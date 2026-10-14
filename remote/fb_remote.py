@@ -299,11 +299,28 @@ vol_pending = None   # (code, time, timer) for a press waiting to see if it's a 
 
 def apply_volume(code):
     use_kodi = kodi_running() and not chromium_running()
+    print(f"[volume] applied {'up' if code == E.KEY_VOLUMEUP else 'down'} "
+          f"({'kodi' if use_kodi else 'system'})", flush=True)
     if use_kodi:
         kodi("Application.SetVolume",
              {"volume": "increment" if code == E.KEY_VOLUMEUP else "decrement"})
     else:
         system_volume(code == E.KEY_VOLUMEUP)
+
+# The remote also sends ONE volume key (alternating up, down, up...) about
+# 0.1 s before every Back tap. Back cancels it; one arriving just after a Back
+# is dropped too, in case the order ever flips.
+AFTER_BACK = 0.3
+last_back_tap = 0.0
+
+def back_tapped():
+    global vol_pending, last_back_tap
+    with vol_lock:
+        last_back_tap = time.monotonic()
+        if vol_pending:
+            vol_pending[2].cancel()
+            vol_pending = None
+            print("[volume] dropped stray key before Back", flush=True)
 
 def volume_key(code, value):
     global vol_pending
@@ -312,6 +329,9 @@ def volume_key(code, value):
         return
     now = time.monotonic()
     with vol_lock:
+        if now - last_back_tap < AFTER_BACK:
+            print("[volume] dropped stray key after Back", flush=True)
+            return
         p = vol_pending
         if p and p[0] != code and now - p[1] < VOL_BLIP:
             p[2].cancel()                            # up+down pair: ignore both
@@ -333,6 +353,8 @@ def read_volume_device(dev, active):
             # value 1 = press, 2 = held (repeats, so holding ramps volume)
             if e.type != E.EV_KEY or e.value not in (1, 2):
                 continue
+            print(f"[volume raw] {dev.path} {E.KEY.get(e.code, e.code)} "
+                  f"value={e.value} t={e.timestamp():.3f}", flush=True)
             if e.code in (E.KEY_VOLUMEUP, E.KEY_VOLUMEDOWN):
                 volume_key(e.code, e.value)
             elif e.code == E.KEY_MUTE and e.value == 1:
@@ -394,7 +416,10 @@ def run(dev):
                 if x is not None:
                     pts.append((x, y))
                 if pts:
-                    dispatch(classify(pts))
+                    action = classify(pts)
+                    if action == "Input.Back":
+                        back_tapped()
+                    dispatch(action)
         elif e.type == E.EV_SYN and touching and x is not None:
             pts.append((x, y))
 
