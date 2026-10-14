@@ -83,10 +83,11 @@ EOF
 echo "Wrote $UNIT"
 
 # 3. Run Chromium inside cage, as the launcher's own comments intend --------
-if ! grep -q 'exec cage' "$LAUNCHER"; then
+# Match the Chromium line itself: the terminal launcher also contains "exec cage".
+if ! grep -qF 'exec cage -s -- "$bin"' "$LAUNCHER"; then
     sed -i 's|^\(\s*\)exec "\$bin" "\${flags\[@\]}"|\1exec cage -s -- "$bin" "${flags[@]}"|' "$LAUNCHER"
 fi
-grep -q 'exec cage -s --' "$LAUNCHER" || { echo "Could not patch $LAUNCHER"; exit 1; }
+grep -qF 'exec cage -s -- "$bin"' "$LAUNCHER" || { echo "Could not patch $LAUNCHER"; exit 1; }
 echo "Launcher now runs Chromium inside cage"
 
 # 4. Let Kodi (running as $USER_NAME) start app units, and nothing else ------
