@@ -3,7 +3,8 @@
     {"id": "live",      "name": "Live TV"},
     {"id": "sports",    "name": "Sports"},
     {"id": "streaming", "name": "Streaming"},
-    {"id": "music",     "name": "Music"}
+    {"id": "music",     "name": "Music"},
+    {"id": "system",    "name": "System"}
   ],
 
   "apps": {
@@ -14,6 +15,7 @@
     "prime":     {"cats": ["streaming"],           "tagline": "Movies, series and Thursday Night Football"},
     "paramount": {"cats": ["streaming", "live"],   "tagline": "CBS live, movies and series"},
     "espn":      {"cats": ["sports", "live"],      "tagline": "Live games, highlights and replays"},
-    "spotify":   {"cats": ["music"],               "tagline": "Music and podcasts"}
+    "spotify":   {"cats": ["music"],               "tagline": "Music and podcasts"},
+    "terminal":  {"cats": ["system"],              "tagline": "Local command line (plug in a keyboard; type exit to return)"}
   }
 }

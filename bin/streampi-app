@@ -101,6 +101,19 @@ cmd_list() {
   for k in $(printf '%s\n' "${!URLS[@]}" | sort); do
     printf '%-12s %-14s %s\n' "$k" "${NAMES[$k]:-$k}" "${URLS[$k]}"
   done
+  printf '%-12s %-14s %s\n' terminal Terminal "(local shell)"
+}
+
+# A local shell for when there is no desktop and no Pi Connect (needs a
+# keyboard). On the desktop it is just a window; in appliance mode it runs
+# fullscreen in cage on tty1, and typing `exit` brings Kodi back.
+launch_terminal() {
+  log "launching Terminal"
+  if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then
+    exec lxterminal --working-directory="$HOME"
+  fi
+  command -v cage >/dev/null 2>&1 || { log "cage not installed"; return 1; }
+  exec cage -s -- lxterminal --working-directory="$HOME"
 }
 
 cmd_stop() {
@@ -158,6 +171,7 @@ case "${1:-}" in
   --list)  cmd_list ;;
   --check) cmd_check ;;
   --stop)  cmd_stop ;;
+  terminal) launch_terminal ;;
   -*)      log "unknown option $1"; exit 2 ;;
   *)       launch "$1" ;;
 esac
