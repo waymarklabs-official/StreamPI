@@ -72,9 +72,14 @@ def wifi_device():
 
 
 def has_connectivity():
-    """True only on a real route to the internet, not merely an IP address."""
+    """True on a real route to the internet, not merely an IP address.
+
+    "portal" counts too: a ship or hotel network that wants a browser login is
+    still the right network, and the Wi-Fi Login tile in Kodi handles the
+    login. Treating it as offline would tear down a working connection.
+    """
     out = run(["nmcli", "-t", "-f", "CONNECTIVITY", "general"]).stdout.strip()
-    return out == "full"
+    return out in ("full", "portal")
 
 
 def ap_password():
@@ -146,6 +151,12 @@ def start_ap():
     if not dev:
         log("no wifi device; cannot start setup AP")
         return False
+    # A system-wide hostapd or dnsmasq grabs the radio and ports 53/67 that
+    # NetworkManager's hotspot needs. Say so plainly instead of failing oddly.
+    for svc in ("hostapd", "dnsmasq"):
+        if run(["systemctl", "is-active", "--quiet", svc]).returncode == 0:
+            log(f"{svc}.service is running and will block the setup AP; "
+                f"disable it with: sudo systemctl disable --now {svc}")
     install_wildcard_dns()
     run(["nmcli", "connection", "delete", "streampi-ap"])  # clear a stale one
     res = run([
@@ -448,7 +459,8 @@ def main():
         stop_ap()
 
     if _connected:
-        clear_tv("Connected. Starting Kodi…")
+        clear_tv("Connected. Starting Kodi…\n"
+                 "If this network has a login page, open Wi-Fi Login in Kodi.")
         return 0
     clear_tv("WiFi setup ended without connecting.")
     return 1

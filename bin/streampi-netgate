@@ -18,10 +18,32 @@ WAIT_SECS="${STREAMPI_NET_WAIT:-45}"
 log() { printf '[streampi-netgate] %s\n' "$*"; }
 
 # Ethernet makes all of this moot, and NM reports it almost instantly.
-online() { [ "$(nmcli -t -f CONNECTIVITY general 2>/dev/null)" = "full" ]; }
+# "portal" counts as online: on a ship or hotel network the Pi is connected
+# but needs a browser login first. Tearing that connection down for setup
+# would make it worse; the Wi-Fi Login tile in Kodi finishes the job.
+online() {
+  case "$(nmcli -t -f CONNECTIVITY general 2>/dev/null)" in
+    full|portal) return 0 ;;
+  esac
+  return 1
+}
+
+# NM here has no connectivity check configured, so it says "full" behind a
+# login page too. Ask a known no-content URL: anything but 204 means a login
+# page is intercepting traffic.
+captive_hint() {
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    http://connectivitycheck.gstatic.com/generate_204 2>/dev/null)
+  if [ "$code" != "204" ]; then
+    log "network needs a browser login (probe got HTTP ${code:-none});" \
+        "open the Wi-Fi Login tile in Kodi"
+  fi
+}
 
 if online; then
   log "already online"
+  captive_hint
   exit 0
 fi
 
@@ -42,6 +64,7 @@ if [ "$has_candidate" = true ]; then
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if online; then
       log "online after $(( WAIT_SECS - (deadline - $(date +%s)) ))s"
+      captive_hint
       exit 0
     fi
     sleep 2
@@ -58,6 +81,7 @@ systemctl start streampi-portal.service || true
 
 if online; then
   log "onboarding succeeded"
+  captive_hint
   exit 0
 fi
 
