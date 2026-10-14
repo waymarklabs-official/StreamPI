@@ -28,9 +28,11 @@ declare -A URLS=(
   [youtubetv]="https://tv.youtube.com/"
   [spotify]="https://open.spotify.com/"
   [espn]="https://www.espn.com/watch/"
+  # Plain HTTP on purpose: ship/hotel login pages can only intercept http.
+  [wifilogin]="http://neverssl.com/"
 )
 declare -A NAMES=(
-  [netflix]="Netflix" [prime]="Prime Video" [paramount]="Paramount+"
+  [netflix]="Netflix" [prime]="Prime Video" [paramount]="Paramount+" [wifilogin]="Wi-Fi Login"
   [youtubetv]="YouTube TV" [spotify]="Spotify" [espn]="ESPN"
 )
 

@@ -37,6 +37,7 @@ THEME = {
     "spotify":   ("#121212", "#1DB954"),
     "youtubetv": ("#0F0F0F", "#FF0000"),
     "terminal":  ("#0C0C0C", "#33FF66"),
+    "wifilogin": ("#0B1E33", "#4FC3F7"),
 }
 DEFAULT_THEME = ("#1C1C24", "#8A8AFF")   # any service you add later
 

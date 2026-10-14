@@ -16,6 +16,7 @@
     "paramount": {"cats": ["streaming", "live"],   "tagline": "CBS live, movies and series"},
     "espn":      {"cats": ["sports", "live"],      "tagline": "Live games, highlights and replays"},
     "spotify":   {"cats": ["music"],               "tagline": "Music and podcasts"},
+    "wifilogin": {"cats": ["system"],              "tagline": "Sign in to ship or hotel Wi-Fi (opens the network login page)"},
     "terminal":  {"cats": ["system"],              "tagline": "Local command line (plug in a keyboard; type exit to return)"}
   }
 }
