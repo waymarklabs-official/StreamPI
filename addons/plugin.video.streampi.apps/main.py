@@ -4,6 +4,8 @@ Paths (point skin widgets at these):
   plugin://plugin.video.streampi.apps/                         category folders
   plugin://plugin.video.streampi.apps/?action=list&cat=all     every app
   plugin://plugin.video.streampi.apps/?action=list&cat=sports  one category
+  plugin://plugin.video.streampi.apps/?action=spotlight&feed=home|sports|live|streaming
+                                                               Spotlight content
 
 Browser apps launch through systemd (streampi-app@<service>), which stops Kodi
 while Chromium runs and brings it back afterwards, crash or not. Entries in
@@ -28,6 +30,7 @@ HANDLE = int(sys.argv[1])
 BASE = sys.argv[0]
 LAUNCHER = "/usr/local/bin/streampi-app"
 RES = xbmcvfs.translatePath(ADDON.getAddonInfo("path")) + "/resources/"
+DATA = xbmcvfs.translatePath(ADDON.getAddonInfo("profile"))
 
 
 def load_catalog():
@@ -113,9 +116,47 @@ def list_apps(catalog, cat_id):
     xbmcplugin.endOfDirectory(HANDLE)
 
 
+def list_spotlight(catalog, feed):
+    """Spotlight items: live games and popular shows. Selecting one opens the
+    app that has it. Falls back to the app tiles so Spotlight is never empty."""
+    try:
+        addon_dir = xbmcvfs.translatePath(ADDON.getAddonInfo("path"))
+        if addon_dir not in sys.path:
+            sys.path.insert(0, addon_dir)
+        from spotlight import Spotlight
+        items = Spotlight(DATA).feed(feed)
+    except Exception as exc:                        # never break the home screen
+        xbmc_log(f"spotlight feed '{feed}' failed: {exc}")
+        items = []
+    if not items:
+        list_apps(catalog, "all")
+        return
+
+    xbmcplugin.setPluginCategory(HANDLE, "Spotlight")
+    xbmcplugin.setContent(HANDLE, "videos")
+    for it in items:
+        li = xbmcgui.ListItem(label=it["title"])
+        li.setArt({k: v for k, v in it["art"].items() if v})
+        tag = li.getVideoInfoTag()
+        tag.setTitle(it["title"])
+        tag.setTagLine(it["tagline"])
+        tag.setPlot(it["plot"] or it["tagline"])
+        tag.setGenres([it["genre"]])
+        li.setLabel2(it["tagline"])
+        li.setProperty("IsPlayable", "false")
+        url = f"{BASE}?action=launch&service={urllib.parse.quote(it['app'])}"
+        xbmcplugin.addDirectoryItem(HANDLE, url, li, isFolder=False)
+    xbmcplugin.endOfDirectory(HANDLE, cacheToDisc=False)
+
+
+def xbmc_log(msg):
+    import xbmc
+    xbmc.log(f"[plugin.video.streampi.apps] {msg}", xbmc.LOGWARNING)
+
+
 def launch(svc):
     try:
-        subprocess.Popen([LAUNCHER, svc], stdout=subprocess.DEVNULL,
+        subprocess.Popen(["sudo", "-n", "/usr/bin/systemctl", "start", "--no-block", f"streampi-app@{svc}.service"], stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError as exc:
         xbmcgui.Dialog().ok("StreamPI", f"Could not start {svc}: {exc}")
@@ -129,6 +170,8 @@ def main():
         launch(params["service"])
     elif action == "list":
         list_apps(catalog, params.get("cat", "all"))
+    elif action == "spotlight":
+        list_spotlight(catalog, params.get("feed", "home"))
     else:
         list_categories(catalog)
 
