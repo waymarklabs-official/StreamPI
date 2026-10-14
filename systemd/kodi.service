@@ -1,0 +1,45 @@
+[Unit]
+Description=Kodi Media Center (StreamPI)
+Documentation=https://kodi.wiki
+# Wait for the network gate so Kodi never starts into a half-connected state.
+# Kodi probes its network addons once at startup and leaves them failed until
+# restarted, so starting 10 seconds early costs you a restart.
+Requires=streampi-netgate.service
+After=streampi-netgate.service
+After=systemd-user-sessions.service sound.target
+# Kodi draws straight to the console framebuffer via GBM, so the login getty
+# has to let go of tty1 first.
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+# video+render: DRM/GPU access. input: the remote and keyboard. audio: ALSA.
+# tty: the console Kodi renders onto.
+SupplementaryGroups=video render input audio tty
+
+# A real login session, so logind grants this process the seat and lets it
+# become DRM master. Without PAMName the GBM backend fails with "failed to
+# become DRM master" and Kodi exits immediately.
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+
+Environment=HOME=/home/@USER@
+WorkingDirectory=/home/@USER@
+ExecStart=/usr/bin/kodi-standalone --windowing=gbm
+
+Restart=always
+RestartSec=3
+# Kodi flushes its databases on shutdown; killing it early corrupts them.
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

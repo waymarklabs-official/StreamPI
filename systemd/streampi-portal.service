@@ -1,0 +1,20 @@
+[Unit]
+Description=StreamPI WiFi onboarding portal
+After=NetworkManager.service
+Requires=NetworkManager.service
+
+[Service]
+Type=oneshot
+# Needs root: binds port 80, writes NetworkManager profiles, and draws on
+# /dev/tty1.
+User=root
+ExecStart=/usr/local/bin/streampi-portal
+# Always tear the hotspot down, even on crash, so a failed run cannot leave the
+# Pi broadcasting an open-ended setup network forever.
+ExecStopPost=-/usr/bin/nmcli connection down streampi-ap
+ExecStopPost=-/usr/bin/nmcli connection delete streampi-ap
+ExecStopPost=-/bin/rm -f /etc/NetworkManager/dnsmasq-shared.d/streampi-portal.conf
+StandardOutput=journal
+StandardError=journal
+# Generous: someone may walk away mid-setup and come back.
+TimeoutStartSec=1800

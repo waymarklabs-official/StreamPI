@@ -1,0 +1,4 @@
+/* Hide scrollbars everywhere; pages still scroll */
+* {
+  scrollbar-width: none !important;
+}

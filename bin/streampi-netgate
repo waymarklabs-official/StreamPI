@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# StreamPI network gate — runs before Kodi, returns once the box is online.
+#
+# Ordering matters more than it looks. NetworkManager reports a device as
+# "connected" the moment it associates and gets a DHCP lease, which is well
+# before a route to the internet actually works. Kodi started in that window
+# comes up with every network addon in a failed state and stays that way until
+# restarted, so this waits for real connectivity (nmcli CONNECTIVITY=full)
+# rather than mere association.
+
+set -uo pipefail
+
+# How long to wait for a known network before assuming there isn't one and
+# handing off to the captive portal. Long enough for a slow DHCP server and a
+# cold WiFi association, short enough not to feel broken.
+WAIT_SECS="${STREAMPI_NET_WAIT:-45}"
+
+log() { printf '[streampi-netgate] %s\n' "$*"; }
+
+# Ethernet makes all of this moot, and NM reports it almost instantly.
+online() { [ "$(nmcli -t -f CONNECTIVITY general 2>/dev/null)" = "full" ]; }
+
+if online; then
+  log "already online"
+  exit 0
+fi
+
+# Only wait if NM has a saved WiFi profile or a wired carrier to work with --
+# otherwise there is nothing to wait *for* and we should go straight to setup.
+has_candidate=false
+if nmcli -t -f TYPE connection show 2>/dev/null | grep -qx '802-11-wireless'; then
+  has_candidate=true
+  log "saved WiFi profile exists; waiting up to ${WAIT_SECS}s for it"
+fi
+if ip -o link show 2>/dev/null | grep -q 'eth0.*state UP'; then
+  has_candidate=true
+  log "ethernet carrier detected; waiting up to ${WAIT_SECS}s for a route"
+fi
+
+if [ "$has_candidate" = true ]; then
+  deadline=$(( $(date +%s) + WAIT_SECS ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if online; then
+      log "online after $(( WAIT_SECS - (deadline - $(date +%s)) ))s"
+      exit 0
+    fi
+    sleep 2
+  done
+  log "timed out waiting for a known network"
+else
+  log "no saved network to try"
+fi
+
+# Hand off to the portal. It is a separate unit so that it can be restarted or
+# inspected on its own, and so a crash there cannot wedge this gate.
+log "starting WiFi onboarding"
+systemctl start streampi-portal.service || true
+
+if online; then
+  log "onboarding succeeded"
+  exit 0
+fi
+
+# Deliberately exit 0 even when still offline: Kodi is perfectly usable for
+# locally cached YouTube videos without a network, and blocking boot on WiFi
+# would leave a black screen with no way to retry. The portal keeps its own
+# retry timer running in the background.
+log "still offline; starting Kodi anyway (cached videos remain playable)"
+exit 0

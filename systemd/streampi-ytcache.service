@@ -1,0 +1,23 @@
+[Unit]
+Description=StreamPI YouTube cache fill and sweep
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+Group=@USER@
+# Sweep first so that space freed by anything watched since the last run is
+# available to the fetch that follows.
+ExecStart=/usr/local/bin/streampi-ytcache sweep
+ExecStart=/usr/local/bin/streampi-ytcache fetch
+StandardOutput=journal
+StandardError=journal
+
+# Downloading is bulk background work and must never compete with playback.
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20
+
+# One run should not be able to hang forever on a stalled download.
+TimeoutStartSec=5400

@@ -1,0 +1,34 @@
+// StreamPI — let the Kodi user switch between Kodi and the streaming apps
+// without a password prompt. Installed to /etc/polkit-1/rules.d/50-streampi.rules.
+//
+// Deliberately narrow: this grants control over four specific units and nothing
+// else. It is not a blanket "manage any systemd unit" rule, because the Kodi
+// user is effectively whoever is holding the remote.
+
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return undefined;
+    }
+    if (subject.user !== "@USER@") {
+        return undefined;
+    }
+
+    var unit = action.lookup("unit") || "";
+
+    // The app launcher template: streampi-app@netflix.service and friends.
+    if (unit.indexOf("streampi-app@") === 0 && unit.indexOf(".service", unit.length - 8) !== -1) {
+        return polkit.Result.YES;
+    }
+
+    // Returning to Kodi, and re-running WiFi setup from inside Kodi.
+    if (unit === "kodi.service" || unit === "streampi-portal.service") {
+        return polkit.Result.YES;
+    }
+
+    // Letting the user kick off a cache refill by hand.
+    if (unit === "streampi-ytcache.service") {
+        return polkit.Result.YES;
+    }
+
+    return undefined;
+});

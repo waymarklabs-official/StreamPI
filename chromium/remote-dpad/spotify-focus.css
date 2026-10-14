@@ -1,0 +1,8 @@
+/* Same bright blue highlight as the D-pad outline, applied to Spotify's focused item */
+:not(html):not(body):focus {
+  outline: 4px solid #3ea6ff !important;
+  outline-offset: -4px !important;
+  box-shadow: 0 0 18px #3ea6ff !important;
+  transition: outline-color .12s ease-out, box-shadow .12s ease-out;
+}
+

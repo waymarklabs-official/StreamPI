@@ -1,0 +1,15 @@
+[Unit]
+Description=Refill the StreamPI YouTube cache periodically
+
+[Timer]
+# First run shortly after boot, so a box switched on after a few days away
+# starts catching up straight away rather than waiting for the next interval.
+OnBootSec=10min
+OnUnitActiveSec=4h
+# Spread runs out so several boxes on one connection do not all pull at once,
+# and so the fetch rarely lands exactly when someone sits down to watch.
+RandomizedDelaySec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="service.streampi.ytcache"
+       name="StreamPI YouTube Cache"
+       version="1.0.0"
+       provider-name="StreamPI">
+  <requires>
+    <import addon="xbmc.python" version="3.0.0"/>
+  </requires>
+  <extension point="xbmc.service" library="service.py" start="login"/>
+  <extension point="xbmc.addon.metadata">
+    <summary lang="en_GB">Frees space by deleting cached YouTube videos once you have watched most of them</summary>
+    <description lang="en_GB">Watches playback of videos in the StreamPI YouTube cache and deletes each one after you pass the configured threshold, by default 75 per cent. Tracks the furthest point reached rather than the stopping point, so rewinding or re-watching a section does not keep a finished video on disk. Works alongside the streampi-ytcache timer, which repeats the same check on a schedule to catch videos left behind by a crash or power cut.</description>
+    <platform>all</platform>
+    <license>MIT</license>
+    <news>1.0.0 - Initial release.</news>
+  </extension>
+</addon>

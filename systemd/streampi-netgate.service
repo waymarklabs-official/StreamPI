@@ -1,0 +1,19 @@
+[Unit]
+Description=StreamPI network gate (wait for connectivity, else run WiFi setup)
+After=NetworkManager.service
+Wants=NetworkManager.service
+Before=kodi.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/streampi-netgate
+# The gate exits 0 even when still offline, on purpose: cached videos play
+# without a network, and failing here would leave a black screen with no
+# obvious way to retry.
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

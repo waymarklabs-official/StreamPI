@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.bak
+# secrets: never commit
+youtube-cookies.txt
+spotlight.json

@@ -2,7 +2,7 @@
 """FB-RCS remote -> desktop, Kodi, or Chromium, depending on what's running.
 
 event6 (touch/stylus device): swipes and taps -> navigation
-event7 (consumer control):    volume keys
+event7 (consumer control):    volume keys (stray up/down blips from Back are dropped)
 
 Desktop (no Kodi, no Chromium): arrows/Enter keyboard navigation,
                                 Back = Escape, x2 = app menu, x3 = launch Kodi
@@ -130,13 +130,27 @@ def as_user(cmd, wait=True):
                      start_new_session=True)
     return True
 
+def appliance():
+    """True when Kodi runs as kodi.service (boot straight to Kodi, no desktop)."""
+    return os.path.exists("/etc/systemd/system/kodi.service")
+
 def launch_kodi():
     global last_launch
     if time.monotonic() - last_launch < 20:   # don't double-launch while it starts
         return
     last_launch = time.monotonic()
+    if appliance():
+        # Let systemd own Kodi so there is never a second copy on the screen.
+        subprocess.run(["systemctl", "start", "--no-block", "kodi.service"])
+        return
     extra = [f"{k}={v}" for k, v in KODI_ENV.items()]
     as_user(["env", *extra, *KODI_CMD], wait=False)
+
+def close_chromium():
+    if appliance():
+        # Stopping the app unit closes Chromium and brings Kodi straight back.
+        subprocess.run(["systemctl", "stop", "streampi-app@*.service"])
+    subprocess.run(["pkill", "-x", CHROMIUM])   # desktop mode, or anything left
 
 # ---------- system volume ----------
 def system_volume(up):
@@ -209,7 +223,7 @@ def handle_browser(action):
             combo(E.KEY_LEFTALT, E.KEY_LEFT)
             action = "page back"
         else:
-            subprocess.run(["pkill", "-x", CHROMIUM])
+            close_chromium()
             action = "close chromium"
             back_count = 0
     elif mode == "keys" and action in KEYMAP:
@@ -256,47 +270,91 @@ def dispatch(action):
         handle_kodi(action)          # Kodi hides its own pointer
     else:
         handle_desktop(action)
-# ---------- volume keys (event7, not grabbed) ----------
-def find_consumer():
+# ---------- volume keys (event7, grabbed) ----------
+# Grabbed so only this script sees them. Without a desktop, Kodi and Chromium
+# read input devices directly, and the remote's stray volume up/down on every
+# Back tap would pop Kodi's volume bar and swallow the Back.
+def find_consumers(skip):
+    """Every device from the remote that can send volume keys, except the
+    touch pad and ones we're already reading. Some remotes expose two."""
+    found = []
     for path in evdev.list_devices():
+        if path in skip:
+            continue
         d = evdev.InputDevice(path)
-        if d.name.startswith(NAME) and \
-           E.KEY_VOLUMEUP in d.capabilities().get(E.EV_KEY, []):
-            return d
-        d.close()
-    return None
+        caps = d.capabilities()
+        has_abs = E.ABS_X in [c for c, _ in caps.get(E.EV_ABS, [])]
+        keys_ = caps.get(E.EV_KEY, [])
+        if d.name.startswith(NAME) and not has_abs and \
+           (E.KEY_VOLUMEUP in keys_ or E.KEY_VOLUMEDOWN in keys_):
+            found.append(d)
+        else:
+            d.close()
+    return found
+
+VOL_BLIP = 0.4   # seconds: an up+down (or down+up) inside this is the remote's
+                 # own button artifact, not a real volume change, so drop both
+vol_lock = threading.Lock()
+vol_pending = None   # (code, time, timer) for a press waiting to see if it's a blip
+
+def apply_volume(code):
+    use_kodi = kodi_running() and not chromium_running()
+    if use_kodi:
+        kodi("Application.SetVolume",
+             {"volume": "increment" if code == E.KEY_VOLUMEUP else "decrement"})
+    else:
+        system_volume(code == E.KEY_VOLUMEUP)
+
+def volume_key(code, value):
+    global vol_pending
+    if value == 2:                                   # held: real volume
+        apply_volume(code)
+        return
+    now = time.monotonic()
+    with vol_lock:
+        p = vol_pending
+        if p and p[0] != code and now - p[1] < VOL_BLIP:
+            p[2].cancel()                            # up+down pair: ignore both
+            vol_pending = None
+            print("[volume] ignored up/down blip", flush=True)
+            return
+        t = threading.Timer(VOL_BLIP, apply_volume, args=(code,))
+        vol_pending = (code, now, t)
+        t.start()
+
+def read_volume_device(dev, active):
+    try:
+        try:
+            dev.grab()
+            print(f"Volume keys grabbed on {dev.path} ({dev.name})", flush=True)
+        except OSError as err:
+            print(f"Could not grab {dev.path} ({dev.name}): {err}", flush=True)
+        for e in dev.read_loop():
+            # value 1 = press, 2 = held (repeats, so holding ramps volume)
+            if e.type != E.EV_KEY or e.value not in (1, 2):
+                continue
+            if e.code in (E.KEY_VOLUMEUP, E.KEY_VOLUMEDOWN):
+                volume_key(e.code, e.value)
+            elif e.code == E.KEY_MUTE and e.value == 1:
+                if kodi_running() and not chromium_running():
+                    kodi("Application.SetMute", {"mute": "toggle"})
+                else:
+                    system_mute()
+    except OSError:
+        print(f"Volume device {dev.path} disconnected", flush=True)
+    finally:
+        active.discard(dev.path)
 
 def volume_loop():
+    """Keeps a grabbed reader on every volume device the remote exposes,
+    picking them up again whenever the remote reconnects."""
+    active = set()
     while True:
-        dev = find_consumer()
-        if dev is None:
-            time.sleep(2)
-            continue
-        print(f"Volume keys on {dev.path}", flush=True)
-        try:
-            for e in dev.read_loop():
-                # value 1 = press, 2 = held (repeats, so holding ramps volume)
-                if e.type != E.EV_KEY or e.value not in (1, 2):
-                    continue
-                use_kodi = kodi_running() and not chromium_running()
-                if e.code == E.KEY_VOLUMEUP:
-                    if use_kodi:
-                        kodi("Application.SetVolume", {"volume": "increment"})
-                    else:
-                        system_volume(True)
-                elif e.code == E.KEY_VOLUMEDOWN:
-                    if use_kodi:
-                        kodi("Application.SetVolume", {"volume": "decrement"})
-                    else:
-                        system_volume(False)
-                elif e.code == E.KEY_MUTE and e.value == 1:
-                    if use_kodi:
-                        kodi("Application.SetMute", {"mute": "toggle"})
-                    else:
-                        system_mute()
-        except OSError:
-            print("Volume device disconnected, waiting...", flush=True)
-            time.sleep(1)
+        for dev in find_consumers(active):
+            active.add(dev.path)
+            threading.Thread(target=read_volume_device, args=(dev, active),
+                             daemon=True).start()
+        time.sleep(2)
 
 # ---------- touch device (event6, grabbed) ----------
 def find_device():

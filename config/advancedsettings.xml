@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- StreamPI — Kodi tuning for a streaming-first box.
+     Installed to ~/.kodi/userdata/advancedsettings.xml -->
+<advancedsettings version="1.0">
+
+  <cache>
+    <!-- Total RAM Kodi devotes to the read-ahead buffer. In Kodi 19+ this is the
+         real total, not the pre-19 value that got tripled internally.
+         100 MB is safe on a 2 GB Pi; raise to ~400 MB if you have 8 GB. -->
+    <memorysize>104857600</memorysize>
+
+    <!-- 1 = buffer all internet filesystems (http/https included). Without this,
+         Kodi only buffers true network filesystems and YouTube streams stutter
+         on any brief WiFi dip. -->
+    <buffermode>1</buffermode>
+
+    <!-- Fill the cache at up to 20x playback rate so it recovers quickly after a
+         seek instead of trickling in at 1x. -->
+    <readfactor>20</readfactor>
+  </cache>
+
+  <video>
+    <!-- Mark something watched at 75%, matching the cache eviction threshold, so
+         Kodi's own "watched" flag and the cache sweeper agree on what 75% means.
+         Change both this and threshold_percent in /etc/streampi/ytcache.conf if
+         you want a different number. -->
+    <playcountminimumpercent>75</playcountminimumpercent>
+
+    <!-- Treat anything past 3 minutes as resumable rather than restarting it. -->
+    <ignoresecondsatstart>180</ignoresecondsatstart>
+
+    <!-- Do not mark as watched purely because playback ended; the sweeper relies
+         on real position data. -->
+    <ignorepercentatend>8</ignorepercentatend>
+  </video>
+
+  <!-- The cache directory is scanned often and holds large files. Skipping
+       thumbnail extraction on scan keeps the library update from pegging the CPU
+       while a video is playing. yt-dlp already writes a real thumbnail next to
+       each file, so Kodi has artwork regardless. -->
+  <videolibrary>
+    <importwatchedstate>true</importwatchedstate>
+    <importresumepoint>true</importresumepoint>
+  </videolibrary>
+
+  <!-- Keep the GUI responsive on a Pi: no fades between windows. -->
+  <gui>
+    <algorithmdirtyregions>3</algorithmdirtyregions>
+  </gui>
+
+</advancedsettings>

@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""StreamPI WiFi onboarding portal.
+
+Runs before Kodi. If the Pi already has connectivity it exits immediately.
+Otherwise it raises a WPA2 hotspot, shows the network name, password and a
+join-QR on the TV, and serves a phone-friendly picker that writes a permanent
+NetworkManager profile.
+
+One hardware constraint shapes the whole design: the Pi's single radio cannot
+scan for networks while it is acting as an access point. So the scan happens
+*before* the hotspot comes up and the results are cached for the portal to
+serve. "Rescan" therefore has to drop the AP, scan, and bring it back, which
+kicks the phone off -- so the UI offers manual SSID entry instead.
+"""
+
+import html
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+AP_ADDR = "10.42.0.1"          # NetworkManager's default for shared mode
+AP_SSID = "StreamPI-Setup"
+PORTAL_PORT = 80
+CONNECT_TIMEOUT = 45           # seconds to wait for the chosen network
+STATE_DIR = "/run/streampi"
+TTY = "/dev/tty1"
+
+# URLs each OS probes to decide whether it is behind a captive portal. Answering
+# these with a redirect is what makes the "Sign in to network" sheet pop up on
+# the phone instead of the user having to open a browser and guess an address.
+PROBE_PATHS = {
+    "/generate_204", "/gen_204",                      # Android
+    "/hotspot-detect.html", "/library/test/success.html",  # iOS / macOS
+    "/ncsi.txt", "/connecttest.txt",                  # Windows
+    "/canonical.html", "/success.txt",                # Firefox / misc
+}
+
+_scan_cache = []
+_server = None
+_connected = False
+
+
+def run(args, **kw):
+    kw.setdefault("capture_output", True)
+    kw.setdefault("text", True)
+    kw.setdefault("timeout", 60)
+    try:
+        return subprocess.run(args, **kw)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"command failed: {' '.join(args)}: {exc}")
+        return subprocess.CompletedProcess(args, 1, "", str(exc))
+
+
+def log(msg):
+    print(f"[streampi-portal] {msg}", flush=True)
+
+
+def wifi_device():
+    out = run(["nmcli", "-t", "-f", "DEVICE,TYPE", "device"]).stdout
+    for line in out.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 2 and parts[1] == "wifi":
+            return parts[0]
+    return None
+
+
+def has_connectivity():
+    """True only on a real route to the internet, not merely an IP address."""
+    out = run(["nmcli", "-t", "-f", "CONNECTIVITY", "general"]).stdout.strip()
+    return out == "full"
+
+
+def ap_password():
+    """Stable per-device passphrase so the QR on screen keeps working."""
+    serial = ""
+    try:
+        with open("/proc/cpuinfo") as fh:
+            for line in fh:
+                if line.startswith("Serial"):
+                    serial = line.split(":")[1].strip()
+                    break
+    except OSError:
+        pass
+    if not serial:
+        serial = run(["cat", "/etc/machine-id"]).stdout.strip()
+    # Last 8 hex digits, uppercased: short enough to retype, long enough that a
+    # neighbour cannot guess their way onto the setup AP and redirect the box.
+    tail = (serial or "0000000000000000")[-8:].upper()
+    return f"stream{tail}"
+
+
+def scan_networks():
+    """Scan and return [{ssid, signal, secure}], strongest first, deduplicated."""
+    dev = wifi_device()
+    if not dev:
+        return []
+    run(["nmcli", "device", "wifi", "rescan"], timeout=30)
+    time.sleep(4)  # the scan is asynchronous; results trickle in
+    out = run([
+        "nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"
+    ]).stdout
+
+    best = {}
+    for line in out.splitlines():
+        # nmcli escapes colons inside fields as "\:" -- split on unescaped ones.
+        fields = re.split(r"(?<!\\):", line)
+        if len(fields) < 3:
+            continue
+        ssid = fields[0].replace("\\:", ":").strip()
+        if not ssid:
+            continue  # hidden network; user can type it manually
+        try:
+            signal = int(fields[1])
+        except ValueError:
+            signal = 0
+        secure = fields[2].strip() not in ("", "--")
+        if ssid not in best or signal > best[ssid]["signal"]:
+            best[ssid] = {"ssid": ssid, "signal": signal, "secure": secure}
+    return sorted(best.values(), key=lambda n: -n["signal"])
+
+
+def install_wildcard_dns():
+    """Point every hostname at us so any URL the phone opens hits the portal.
+
+    NetworkManager runs its own dnsmasq for shared connections and reads extra
+    config from this directory, so we do not have to manage dnsmasq ourselves.
+    """
+    d = "/etc/NetworkManager/dnsmasq-shared.d"
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "streampi-portal.conf"), "w") as fh:
+        fh.write(
+            "# StreamPI: resolve all names to the portal while the setup AP is up.\n"
+            f"address=/#/{AP_ADDR}\n"
+        )
+
+
+def start_ap():
+    dev = wifi_device()
+    if not dev:
+        log("no wifi device; cannot start setup AP")
+        return False
+    install_wildcard_dns()
+    run(["nmcli", "connection", "delete", "streampi-ap"])  # clear a stale one
+    res = run([
+        "nmcli", "device", "wifi", "hotspot",
+        "ifname", dev, "con-name", "streampi-ap",
+        "ssid", AP_SSID, "password", ap_password(),
+    ])
+    if res.returncode != 0:
+        log(f"failed to start hotspot: {res.stderr.strip()}")
+        return False
+    log(f"setup AP up: SSID={AP_SSID} at {AP_ADDR}")
+    return True
+
+
+def stop_ap():
+    run(["nmcli", "connection", "down", "streampi-ap"])
+    run(["nmcli", "connection", "delete", "streampi-ap"])
+    try:
+        os.remove("/etc/NetworkManager/dnsmasq-shared.d/streampi-portal.conf")
+    except OSError:
+        pass
+
+
+def show_on_tv():
+    """Paint setup instructions and a join-QR on the HDMI console."""
+    pw = ap_password()
+    qr = ""
+    if shutil.which("qrencode"):
+        # WIFI: URI -- scanning it joins the hotspot without typing the password.
+        payload = f"WIFI:T:WPA;S:{AP_SSID};P:{pw};;"
+        qr = run(["qrencode", "-t", "ANSIUTF8", "-m", "2", payload]).stdout
+
+    screen = (
+        "\033[2J\033[H"                      # clear, home
+        "\033[1;36m"
+        "        S T R E A M P I\n\n"
+        "\033[0m"
+        "  Let's get you on WiFi.\n\n"
+        "  1. On your phone, scan this code\n"
+        "     (or join the network by hand)\n\n"
+        f"{qr}\n"
+        f"  Network:  \033[1m{AP_SSID}\033[0m\n"
+        f"  Password: \033[1m{pw}\033[0m\n\n"
+        "  2. A setup page opens automatically.\n"
+        "     If it doesn't, visit\n"
+        f"     \033[1mhttp://{AP_ADDR}\033[0m\n\n"
+        "  Kodi starts as soon as you're online.\n"
+    )
+    try:
+        with open(TTY, "w") as tty:
+            tty.write(screen)
+    except OSError as exc:
+        # Headless or no console access -- not fatal, the portal still works.
+        log(f"could not draw on {TTY}: {exc}")
+
+
+def clear_tv(message):
+    try:
+        with open(TTY, "w") as tty:
+            tty.write("\033[2J\033[H\033[1;32m" + message + "\033[0m\n")
+    except OSError:
+        pass
+
+
+PAGE = """<!doctype html>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>StreamPI setup</title>
+<style>
+ *{box-sizing:border-box}
+ body{margin:0;font:17px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      background:#11131a;color:#eef1f7;padding:24px 18px;max-width:560px;margin:0 auto}
+ h1{font-size:25px;margin:0 0 4px}
+ p.sub{color:#9aa3b5;margin:0 0 26px}
+ ul{list-style:none;padding:0;margin:0 0 22px}
+ li{margin-bottom:9px}
+ button.net{width:100%;text-align:left;background:#1b1f2b;border:1px solid #2b3142;
+      color:#eef1f7;padding:15px 16px;border-radius:12px;font:inherit;cursor:pointer;
+      display:flex;justify-content:space-between;align-items:center;gap:12px}
+ button.net:active{background:#232838}
+ .meta{color:#79839a;font-size:14px;white-space:nowrap}
+ form{background:#1b1f2b;border:1px solid #2b3142;border-radius:12px;padding:18px;margin-top:8px}
+ label{display:block;font-size:14px;color:#9aa3b5;margin-bottom:6px}
+ input{width:100%;padding:13px;border-radius:9px;border:1px solid #2b3142;
+      background:#11131a;color:#eef1f7;font:inherit;margin-bottom:14px}
+ input:focus{outline:2px solid #4b8dff;outline-offset:-1px}
+ .go{width:100%;background:#2f6df6;border:0;color:#fff;padding:14px;border-radius:9px;
+      font:inherit;font-weight:600;cursor:pointer}
+ .go:disabled{opacity:.55}
+ #msg{margin-top:16px;padding:13px;border-radius:9px;display:none}
+ .err{background:#3a1d22;color:#ffb4b4;display:block!important}
+ .ok{background:#15301f;color:#9ff0bd;display:block!important}
+ details{margin-top:18px;color:#9aa3b5}
+ summary{cursor:pointer;padding:8px 0}
+</style>
+<h1>Connect StreamPI to WiFi</h1>
+<p class=sub>Pick your home network. This is saved on the box, so you only do it once.</p>
+<ul id=nets></ul>
+<form id=f style=display:none>
+  <label>Network</label>
+  <input id=ssid name=ssid autocomplete=off>
+  <label>Password</label>
+  <input id=psk name=psk type=password autocomplete=off
+         placeholder="leave blank if the network is open">
+  <button class=go id=go>Connect</button>
+</form>
+<div id=msg></div>
+<details>
+  <summary>My network isn't listed</summary>
+  <p>Hidden networks and ones out of range won't appear. Tap below to type the
+     name exactly, including capital letters.</p>
+  <button class=go id=manual>Enter network manually</button>
+</details>
+<script>
+const nets=document.getElementById('nets'),f=document.getElementById('f'),
+      msg=document.getElementById('msg'),ssid=document.getElementById('ssid'),
+      psk=document.getElementById('psk'),go=document.getElementById('go');
+function pick(n){
+  ssid.value=n.ssid; f.style.display='block';
+  psk.style.display=n.secure?'block':'none';
+  psk.previousElementSibling.style.display=n.secure?'block':'none';
+  (n.secure?psk:go).focus();
+  f.scrollIntoView({behavior:'smooth',block:'center'});
+}
+fetch('/scan.json').then(r=>r.json()).then(list=>{
+  if(!list.length){nets.innerHTML='<li class=meta>No networks found.</li>';return}
+  list.forEach(n=>{
+    const li=document.createElement('li'),b=document.createElement('button');
+    b.className='net';
+    b.innerHTML='<span></span><span class=meta></span>';
+    b.firstChild.textContent=n.ssid;
+    b.lastChild.textContent=(n.secure?'\\u{1F512} ':'')+n.signal+'%';
+    b.onclick=()=>pick(n); li.appendChild(b); nets.appendChild(li);
+  });
+});
+document.getElementById('manual').onclick=e=>{
+  e.preventDefault(); pick({ssid:'',secure:true});
+};
+f.onsubmit=async e=>{
+  e.preventDefault();
+  if(!ssid.value.trim()){msg.className='err';msg.textContent='Enter a network name.';return}
+  go.disabled=true; go.textContent='Connecting\\u2026';
+  msg.className=''; msg.style.display='none';
+  try{
+    const r=await fetch('/connect',{method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:new URLSearchParams({ssid:ssid.value,psk:psk.value})});
+    const d=await r.json();
+    if(d.ok){
+      msg.className='ok';
+      msg.textContent='Connected. StreamPI is starting up \\u2014 check your TV. '+
+                      'This network will drop in a moment, which is expected.';
+      f.style.display='none';
+    }else{
+      msg.className='err'; msg.textContent=d.error||'Could not connect.';
+      go.disabled=false; go.textContent='Connect';
+    }
+  }catch(err){
+    // A dropped request right at success is normal: the AP goes down.
+    msg.className='ok';
+    msg.textContent='Connection attempt sent. Check your TV.';
+  }
+};
+</script>
+"""
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        pass  # keep the journal readable
+
+    def _send(self, code, body=b"", ctype="text/html; charset=utf-8", extra=None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+        if path in PROBE_PATHS:
+            # 302 rather than 204: the redirect is what opens the sign-in sheet.
+            self._send(302, b"", extra={"Location": f"http://{AP_ADDR}/"})
+            return
+        if path == "/scan.json":
+            self._send(200, json.dumps(_scan_cache).encode(), "application/json")
+            return
+        if path in ("/", "/index.html"):
+            self._send(200, PAGE.encode())
+            return
+        self._send(302, b"", extra={"Location": f"http://{AP_ADDR}/"})
+
+    def do_POST(self):
+        global _connected
+        if urllib.parse.urlparse(self.path).path != "/connect":
+            self._send(404, b"not found")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 4096:
+            self._send(400, b'{"ok":false,"error":"bad request"}', "application/json")
+            return
+        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        ssid = (form.get("ssid", [""])[0]).strip()
+        psk = form.get("psk", [""])[0]
+
+        if not ssid:
+            self._send(400, b'{"ok":false,"error":"Network name is required."}',
+                       "application/json")
+            return
+        if psk and not 8 <= len(psk) <= 63:
+            self._send(200,
+                       b'{"ok":false,"error":"WPA passwords are 8-63 characters."}',
+                       "application/json")
+            return
+
+        log(f"attempting connection to {ssid!r}")
+        # Answer before tearing down the AP, otherwise the phone never sees the
+        # response -- its route to us disappears with the hotspot.
+        self._send(200, b'{"ok":true}', "application/json")
+        try:
+            self.wfile.flush()
+        except OSError:
+            pass
+
+        if try_connect(ssid, psk):
+            _connected = True
+            if _server:
+                # Shut the server from another thread; calling it from the
+                # handler would deadlock.
+                import threading
+                threading.Thread(target=_server.shutdown, daemon=True).start()
+
+
+def try_connect(ssid, psk):
+    stop_ap()
+    time.sleep(2)  # let the radio settle out of AP mode
+    dev = wifi_device()
+    args = ["nmcli", "device", "wifi", "connect", ssid]
+    if psk:
+        args += ["password", psk]
+    if dev:
+        args += ["ifname", dev]
+    res = run(args, timeout=CONNECT_TIMEOUT)
+    if res.returncode != 0:
+        log(f"connect failed: {res.stderr.strip()}")
+        return False
+
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        if has_connectivity():
+            log(f"connected to {ssid!r}")
+            return True
+        time.sleep(2)
+    log("associated but no internet route")
+    return False
+
+
+def main():
+    os.makedirs(STATE_DIR, exist_ok=True)
+
+    if has_connectivity():
+        log("already online; nothing to do")
+        return 0
+
+    log("no connectivity; starting onboarding")
+    global _scan_cache, _server
+    # Must happen before the AP comes up: one radio cannot scan and beacon.
+    _scan_cache = scan_networks()
+    log(f"found {len(_scan_cache)} networks")
+
+    if not start_ap():
+        clear_tv("WiFi setup could not start. Plug in Ethernet, or\n"
+                 "check `journalctl -u streampi-portal`.")
+        return 1
+    show_on_tv()
+
+    _server = ThreadingHTTPServer(("0.0.0.0", PORTAL_PORT), Handler)
+    _server.daemon_threads = True
+
+    def bail(signum, frame):
+        if _server:
+            _server.shutdown()
+    signal.signal(signal.SIGTERM, bail)
+    signal.signal(signal.SIGINT, bail)
+
+    log(f"portal listening on {AP_ADDR}:{PORTAL_PORT}")
+    try:
+        _server.serve_forever()
+    finally:
+        _server.server_close()
+        stop_ap()
+
+    if _connected:
+        clear_tv("Connected. Starting Kodi…")
+        return 0
+    clear_tv("WiFi setup ended without connecting.")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

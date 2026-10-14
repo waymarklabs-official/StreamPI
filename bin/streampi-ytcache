@@ -1,0 +1,471 @@
+#!/usr/bin/env python3
+"""StreamPI YouTube cache — fills from your recommendations, evicts at 75% watched.
+
+Subcommands:
+    fetch    pull new recommendations and download until the quota is reached
+    sweep    delete anything watched past the threshold, then enforce the quota
+    status   show what is cached and how much room is left
+    forget   drop a video id from state without deleting (debugging)
+
+The 75% rule is enforced in two places on purpose. The Kodi service addon
+deletes a video the moment you stop watching past the threshold, which is what
+makes space free up promptly. This sweeper repeats the check on a timer so that
+a Kodi crash, a power cut mid-playback, or playback through anything other than
+Kodi still eventually reclaims the space.
+"""
+
+import argparse
+import configparser
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+CONF_PATH = "/etc/streampi/ytcache.conf"
+DEFAULTS = {
+    "cache_dir": "/var/lib/streampi/youtube",
+    "cookies": "/etc/streampi/youtube-cookies.txt",
+    "max_cache_gb": "16",        # hard ceiling regardless of free space
+    "reserve_gb": "4",           # never let free space drop below this
+    "threshold_percent": "75",   # delete once watched this far
+    "max_videos": "40",
+    "max_duration_min": "90",    # skip anything longer; it eats the whole cache
+    "min_duration_sec": "70",    # skip Shorts
+    "max_height": "1080",
+    "source": "recommended",     # recommended | subscriptions | watchlater | trending
+}
+
+SOURCES = {
+    # yt-dlp's shorthand extractors. All but "trending" need cookies to mean
+    # anything -- without them YouTube serves a generic logged-out feed.
+    "recommended": ":ytrec",
+    "subscriptions": ":ytsubs",
+    "watchlater": ":ytwatchlater",
+    "trending": "https://www.youtube.com/feed/trending",
+}
+
+
+def load_conf():
+    cp = configparser.ConfigParser()
+    cp["ytcache"] = dict(DEFAULTS)
+    if os.path.exists(CONF_PATH):
+        cp.read(CONF_PATH)
+    return cp["ytcache"]
+
+
+class State:
+    """Tracks every cached video. Lives beside the videos so a wiped cache
+    directory cannot leave orphaned bookkeeping behind."""
+
+    def __init__(self, cache_dir):
+        self.path = os.path.join(cache_dir, ".state.json")
+        self.data = {}
+        if os.path.exists(self.path):
+            try:
+                with open(self.path) as fh:
+                    self.data = json.load(fh)
+            except (OSError, ValueError):
+                # Corrupt state is recoverable: everything in it can be rebuilt
+                # from the files on disk, so start clean rather than crash.
+                self.data = {}
+
+    def save(self):
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(self.data, fh, indent=1, sort_keys=True)
+        os.replace(tmp, self.path)  # atomic; the addon reads this concurrently
+
+    def get(self, vid):
+        return self.data.setdefault(vid, {
+            "added": time.time(), "max_percent": 0.0, "file": None, "title": "",
+        })
+
+
+def dir_size(path):
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def budget_bytes(conf):
+    """Bytes the cache may occupy, from the smaller of the configured ceiling
+    and what the disk can actually spare."""
+    cache_dir = conf["cache_dir"]
+    st = os.statvfs(cache_dir)
+    free = st.f_bavail * st.f_frsize
+    used = dir_size(cache_dir)
+    reserve = float(conf["reserve_gb"]) * 1024**3
+    ceiling = float(conf["max_cache_gb"]) * 1024**3
+    # Space we could grow into = current usage + free - reserve.
+    headroom = max(0, used + free - reserve)
+    return int(min(ceiling, headroom))
+
+
+def files_for(cache_dir, vid):
+    """Every artifact yt-dlp wrote for this id: video, info json, thumb, nfo."""
+    out = []
+    for name in os.listdir(cache_dir):
+        if name.startswith(f"{vid}.") or name.startswith(f"{vid}_"):
+            out.append(os.path.join(cache_dir, name))
+    return out
+
+
+def delete_video(cache_dir, vid, state, reason):
+    freed = 0
+    for p in files_for(cache_dir, vid):
+        try:
+            freed += os.path.getsize(p)
+            os.remove(p)
+        except OSError as exc:
+            print(f"  could not remove {p}: {exc}")
+    state.data.pop(vid, None)
+    print(f"  evicted {vid} ({freed / 1024**2:.0f} MB) — {reason}")
+    return freed
+
+
+def ytdlp_base(conf):
+    cmd = ["yt-dlp", "--ignore-config", "--no-progress", "--no-warnings"]
+    cookies = conf["cookies"]
+    if os.path.exists(cookies):
+        cmd += ["--cookies", cookies]
+    return cmd
+
+
+def list_candidates(conf, limit):
+    """Video ids from the configured feed, newest/most-recommended first."""
+    source = conf["source"]
+    url = SOURCES.get(source, SOURCES["recommended"])
+    cookies_present = os.path.exists(conf["cookies"])
+
+    if source != "trending" and not cookies_present:
+        print(f"  no cookie file at {conf['cookies']};")
+        print("  YouTube will serve a generic logged-out feed rather than your")
+        print("  recommendations. See README 'Personalised recommendations'.")
+
+    cmd = ytdlp_base(conf) + [
+        "--flat-playlist", "--dump-json",
+        "--playlist-end", str(limit * 3),  # over-fetch; many get filtered out
+        url,
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if res.returncode != 0:
+        print(f"  feed fetch failed: {res.stderr.strip().splitlines()[-1:] or ''}")
+        return []
+
+    out = []
+    for line in res.stdout.splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        vid = item.get("id")
+        if not vid or len(vid) != 11:
+            continue
+        out.append({
+            "id": vid,
+            "title": item.get("title") or vid,
+            "duration": item.get("duration") or 0,
+            "live": bool(item.get("is_live") or item.get("live_status") == "is_live"),
+        })
+    return out
+
+
+def write_nfo(cache_dir, vid, info):
+    """Give Kodi real metadata without making it run a scraper over the cache."""
+    import xml.etree.ElementTree as ET
+    root = ET.Element("movie")
+
+    def el(tag, text):
+        if text not in (None, ""):
+            ET.SubElement(root, tag).text = str(text)
+
+    el("title", info.get("title"))
+    el("plot", info.get("description"))
+    el("studio", info.get("uploader"))
+    el("director", info.get("uploader"))
+    upload = info.get("upload_date") or ""
+    if len(upload) == 8:
+        el("premiered", f"{upload[:4]}-{upload[4:6]}-{upload[6:]}")
+        el("year", upload[:4])
+    if info.get("duration"):
+        runtime = ET.SubElement(root, "fileinfo")
+        stream = ET.SubElement(runtime, "streamdetails")
+        video = ET.SubElement(stream, "video")
+        ET.SubElement(video, "durationinseconds").text = str(int(info["duration"]))
+    el("id", vid)
+
+    tree = ET.ElementTree(root)
+    ET.indent(tree, space="  ")
+    tree.write(os.path.join(cache_dir, f"{vid}.nfo"),
+               encoding="UTF-8", xml_declaration=True)
+
+
+def download(conf, cand):
+    """Fetch one video. Returns its size in bytes, or 0 on failure."""
+    cache_dir = conf["cache_dir"]
+    vid = cand["id"]
+    height = conf["max_height"]
+
+    # Format selection is the single most important setting on a Pi. YouTube
+    # serves VP9 and AV1 by default; neither has a hardware decoder here, so
+    # 1080p in those codecs drops frames badly. Forcing avc1 (H.264) keeps
+    # playback smooth on Pi 4 hardware decode and within CPU budget on Pi 5.
+    fmt = (
+        f"bv*[vcodec^=avc1][height<={height}]+ba[ext=m4a]"
+        f"/b[vcodec^=avc1][height<={height}]"
+        f"/bv*[height<={height}]+ba/b[height<={height}]"
+    )
+
+    cmd = ytdlp_base(conf) + [
+        "-f", fmt,
+        "--merge-output-format", "mp4",
+        "--no-playlist",
+        "--match-filter", "!is_live & !was_live",
+        "--write-info-json",
+        "--write-thumbnail", "--convert-thumbnails", "jpg",
+        "--retries", "3",
+        "--fragment-retries", "5",
+        "-o", os.path.join(cache_dir, "%(id)s.%(ext)s"),
+        "-o", "thumbnail:" + os.path.join(cache_dir, "%(id)s.%(ext)s"),
+        f"https://www.youtube.com/watch?v={vid}",
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    if res.returncode != 0:
+        tail = (res.stderr.strip().splitlines() or ["unknown error"])[-1]
+        print(f"  skip {vid}: {tail[:110]}")
+        # Clear partial fragments so a failed download does not squat on space.
+        for p in files_for(cache_dir, vid):
+            if p.endswith((".part", ".ytdl")):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        return 0
+
+    info_path = os.path.join(cache_dir, f"{vid}.info.json")
+    info = {}
+    if os.path.exists(info_path):
+        try:
+            with open(info_path) as fh:
+                info = json.load(fh)
+        except (OSError, ValueError):
+            pass
+    if info:
+        write_nfo(cache_dir, vid, info)
+
+    video = next((p for p in files_for(cache_dir, vid)
+                  if p.endswith((".mp4", ".mkv", ".webm"))), None)
+    if not video:
+        return 0
+    return os.path.getsize(video)
+
+
+def cmd_fetch(conf, args):
+    cache_dir = conf["cache_dir"]
+    os.makedirs(cache_dir, exist_ok=True)
+    state = State(cache_dir)
+
+    if not shutil.which("yt-dlp"):
+        sys.exit("yt-dlp is not installed. Run: sudo /opt/streampi/install.sh --update-ytdlp")
+
+    budget = budget_bytes(conf)
+    used = dir_size(cache_dir)
+    print(f"cache: {used / 1024**3:.1f} GB used of {budget / 1024**3:.1f} GB budget")
+
+    if used >= budget:
+        print("  at budget; running sweep instead of fetching")
+        return cmd_sweep(conf, args)
+
+    max_videos = int(conf["max_videos"])
+    have = len([v for v in state.data if state.data[v].get("file")])
+    if have >= max_videos:
+        print(f"  already holding {have}/{max_videos} videos")
+        return 0
+
+    print(f"fetching from '{conf['source']}' feed…")
+    candidates = list_candidates(conf, max_videos)
+    if not candidates:
+        print("  no candidates returned")
+        return 1
+
+    min_dur = int(conf["min_duration_sec"])
+    max_dur = int(conf["max_duration_min"]) * 60
+    added = 0
+
+    for cand in candidates:
+        if used >= budget or have >= max_videos:
+            break
+        vid = cand["id"]
+        if vid in state.data:
+            continue
+        if cand["live"]:
+            continue
+        dur = cand["duration"] or 0
+        if dur and dur < min_dur:
+            continue  # Shorts
+        if dur and dur > max_dur:
+            continue
+
+        print(f"  + {cand['title'][:58]}")
+        size = download(conf, cand)
+        if size <= 0:
+            # Record the failure so we do not retry it every single run.
+            state.data[vid] = {"added": time.time(), "max_percent": 0.0,
+                               "file": None, "title": cand["title"],
+                               "failed": True}
+            continue
+
+        video = next((p for p in files_for(cache_dir, vid)
+                      if p.endswith((".mp4", ".mkv", ".webm"))), None)
+        state.data[vid] = {
+            "added": time.time(), "max_percent": 0.0,
+            "file": video, "title": cand["title"], "duration": dur,
+        }
+        used += size
+        have += 1
+        added += 1
+        state.save()
+
+    state.save()
+    print(f"added {added} video(s); {used / 1024**3:.1f} GB used")
+    return 0
+
+
+def cmd_sweep(conf, args):
+    cache_dir = conf["cache_dir"]
+    if not os.path.isdir(cache_dir):
+        return 0
+    state = State(cache_dir)
+    threshold = float(conf["threshold_percent"])
+    freed = 0
+
+    # 1. Anything watched past the threshold goes, regardless of space pressure.
+    for vid in list(state.data):
+        entry = state.data[vid]
+        if entry.get("max_percent", 0) >= threshold:
+            freed += delete_video(cache_dir, vid, state,
+                                  f"watched {entry['max_percent']:.0f}%")
+
+    # 2. Drop bookkeeping for files that vanished from under us.
+    for vid in list(state.data):
+        f = state.data[vid].get("file")
+        if f and not os.path.exists(f):
+            state.data.pop(vid, None)
+
+    # 3. Adopt files that exist on disk but not in state, so a manually copied
+    #    video still counts against the quota instead of silently overfilling it.
+    known = {os.path.basename(e["file"]) for e in state.data.values()
+             if e.get("file")}
+    for name in os.listdir(cache_dir):
+        if not name.endswith((".mp4", ".mkv", ".webm")):
+            continue
+        if name in known:
+            continue
+        vid = name.rsplit(".", 1)[0]
+        path = os.path.join(cache_dir, name)
+        state.data[vid] = {"added": os.path.getmtime(path), "max_percent": 0.0,
+                           "file": path, "title": vid}
+
+    # 4. Enforce the quota by evicting least-recently-added unwatched videos.
+    budget = budget_bytes(conf)
+    used = dir_size(cache_dir)
+    if used > budget:
+        print(f"over budget: {used / 1024**3:.1f} GB > {budget / 1024**3:.1f} GB")
+        by_age = sorted(
+            (v for v in state.data.items() if v[1].get("file")),
+            key=lambda kv: kv[1].get("added", 0),
+        )
+        for vid, entry in by_age:
+            if used <= budget:
+                break
+            got = delete_video(cache_dir, vid, state, "quota pressure")
+            used -= got
+            freed += got
+
+    state.save()
+    if freed:
+        print(f"freed {freed / 1024**2:.0f} MB")
+    else:
+        print("nothing to evict")
+    return 0
+
+
+def cmd_status(conf, args):
+    cache_dir = conf["cache_dir"]
+    if not os.path.isdir(cache_dir):
+        print("cache directory does not exist yet")
+        return 0
+    state = State(cache_dir)
+    used = dir_size(cache_dir)
+    budget = budget_bytes(conf)
+    st = os.statvfs(cache_dir)
+    free = st.f_bavail * st.f_frsize
+
+    print(f"cache dir   {cache_dir}")
+    print(f"source      {conf['source']}"
+          f"{'' if os.path.exists(conf['cookies']) else '  (no cookies: generic feed)'}")
+    print(f"used        {used / 1024**3:.2f} GB")
+    print(f"budget      {budget / 1024**3:.2f} GB"
+          f"  (ceiling {conf['max_cache_gb']} GB, reserve {conf['reserve_gb']} GB)")
+    print(f"disk free   {free / 1024**3:.2f} GB")
+    print(f"threshold   delete at {conf['threshold_percent']}% watched")
+    live = [(v, e) for v, e in state.data.items() if e.get("file")]
+    print(f"\n{len(live)} video(s):")
+    for vid, e in sorted(live, key=lambda kv: kv[1].get("added", 0)):
+        try:
+            mb = os.path.getsize(e["file"]) / 1024**2
+        except OSError:
+            mb = 0
+        print(f"  {e.get('max_percent', 0):3.0f}%  {mb:6.0f} MB  {e.get('title', vid)[:52]}")
+    failed = [e for e in state.data.values() if e.get("failed")]
+    if failed:
+        print(f"\n{len(failed)} previously failed, will not be retried "
+              f"(clear with: streampi-ytcache forget --failed)")
+    return 0
+
+
+def cmd_forget(conf, args):
+    state = State(conf["cache_dir"])
+    if args.failed:
+        n = len([v for v, e in list(state.data.items()) if e.get("failed")])
+        state.data = {v: e for v, e in state.data.items() if not e.get("failed")}
+        state.save()
+        print(f"cleared {n} failed entries")
+        return 0
+    if not args.video_id:
+        sys.exit("give a video id or --failed")
+    state.data.pop(args.video_id, None)
+    state.save()
+    print(f"forgot {args.video_id}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("fetch")
+    sub.add_parser("sweep")
+    sub.add_parser("status")
+    f = sub.add_parser("forget")
+    f.add_argument("video_id", nargs="?")
+    f.add_argument("--failed", action="store_true")
+    args = ap.parse_args()
+
+    conf = load_conf()
+    os.makedirs(conf["cache_dir"], exist_ok=True)
+    return {
+        "fetch": cmd_fetch, "sweep": cmd_sweep,
+        "status": cmd_status, "forget": cmd_forget,
+    }[args.cmd](conf, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

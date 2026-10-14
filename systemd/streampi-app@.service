@@ -1,0 +1,36 @@
+[Unit]
+Description=StreamPI streaming app: %i
+# The whole handover mechanism. Conflicts is symmetric in systemd, so starting
+# this stops Kodi, and starting Kodi stops this. Only one process can be DRM
+# master on the display pipeline at a time.
+Conflicts=kodi.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+SupplementaryGroups=video render input audio tty
+
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+
+Environment=HOME=/home/@USER@
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@
+ExecStart=/usr/local/bin/streampi-app %i
+
+# Bring Kodi back however this ended -- clean exit, crash, or being stopped.
+# --no-block avoids a deadlock against the Conflicts= above, which would
+# otherwise have systemd waiting on this unit to finish stopping.
+ExecStopPost=/usr/bin/systemctl start --no-block kodi.service
+
+# Never restart: if Chromium cannot run, looping would make the TV flicker
+# between a black screen and Kodi indefinitely.
+Restart=no
+TimeoutStopSec=15

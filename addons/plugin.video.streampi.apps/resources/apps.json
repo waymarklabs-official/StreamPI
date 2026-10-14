@@ -1,0 +1,19 @@
+{
+  "categories": [
+    {"id": "live",      "name": "Live TV"},
+    {"id": "sports",    "name": "Sports"},
+    {"id": "streaming", "name": "Streaming"},
+    {"id": "music",     "name": "Music"}
+  ],
+
+  "apps": {
+    "youtubetv": {"cats": ["live", "sports"],      "tagline": "Live TV, local channels and sports"},
+    "youtube":   {"cats": ["streaming"],           "tagline": "Videos, creators and subscriptions",
+                  "name": "YouTube", "kodi": "plugin://plugin.video.youtube/"},
+    "netflix":   {"cats": ["streaming"],           "tagline": "Movies, series and originals"},
+    "prime":     {"cats": ["streaming"],           "tagline": "Movies, series and Thursday Night Football"},
+    "paramount": {"cats": ["streaming", "live"],   "tagline": "CBS live, movies and series"},
+    "espn":      {"cats": ["sports", "live"],      "tagline": "Live games, highlights and replays"},
+    "spotify":   {"cats": ["music"],               "tagline": "Music and podcasts"}
+  }
+}

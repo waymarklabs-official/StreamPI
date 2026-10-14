@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<settings version="1">
+  <section id="service.streampi.ytcache">
+    <category id="general" label="Cache">
+      <group id="1">
+        <setting id="threshold" type="integer" label="Delete after watching">
+          <level>0</level>
+          <default>75</default>
+          <constraints>
+            <minimum>25</minimum>
+            <step>5</step>
+            <maximum>100</maximum>
+          </constraints>
+          <control type="slider" format="percentage">
+            <popup>false</popup>
+          </control>
+        </setting>
+        <setting id="notify" type="boolean" label="Notify when space is reclaimed">
+          <level>0</level>
+          <default>true</default>
+          <control type="toggle"/>
+        </setting>
+      </group>
+    </category>
+  </section>
+</settings>

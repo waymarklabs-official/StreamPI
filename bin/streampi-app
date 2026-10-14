@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# StreamPI app launcher — runs one streaming service fullscreen, then returns
+# to Kodi.
+#
+# Kodi and Chromium cannot both be up: each wants to be DRM master on the single
+# display pipeline, and the second one to ask gets "permission denied" and a
+# black screen. systemd enforces the handover via Conflicts= in
+# streampi-app@.service, so this script never has to stop Kodi itself.
+#
+#   streampi-app netflix        launch a service (normally via systemd)
+#   streampi-app --list         show configured services
+#   streampi-app --check        verify Chromium, Widevine and the compositor
+#   streampi-app --stop         return to Kodi
+
+set -uo pipefail
+
+PROFILES=/var/lib/streampi/chromium
+CONF=/etc/streampi/apps.conf
+
+log() { printf '[streampi-app] %s\n' "$*" >&2; }
+
+# Per-service URL. These are the official web players; each keeps its own
+# Chromium profile so the six logins never collide.
+declare -A URLS=(
+  [netflix]="https://www.netflix.com/browse"
+  [prime]="https://www.amazon.com/gp/video/storefront"
+  [paramount]="https://www.paramountplus.com/"
+  [youtubetv]="https://tv.youtube.com/"
+  [spotify]="https://open.spotify.com/"
+  [espn]="https://www.espn.com/watch/"
+)
+declare -A NAMES=(
+  [netflix]="Netflix" [prime]="Prime Video" [paramount]="Paramount+"
+  [youtubetv]="YouTube TV" [spotify]="Spotify" [espn]="ESPN"
+)
+
+# Operator overrides without editing this file.
+[ -r "$CONF" ] && . "$CONF"
+
+find_chromium() {
+  for c in chromium-browser chromium /usr/lib/chromium-browser/chromium-browser; do
+    command -v "$c" >/dev/null 2>&1 && { command -v "$c"; return 0; }
+  done
+  return 1
+}
+
+find_widevine() {
+  # Raspberry Pi OS ships the CDM with chromium; path has moved between
+  # releases, so look in all the places it has lived.
+  local p
+  for p in \
+    /usr/lib/chromium-browser/libwidevinecdm.so \
+    /usr/lib/chromium-browser/WidevineCdm/_platform_specific/linux_arm64/libwidevinecdm.so \
+    /usr/lib/chromium/libwidevinecdm.so \
+    /opt/WidevineCdm/_platform_specific/linux_arm64/libwidevinecdm.so
+  do
+    [ -f "$p" ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+cmd_check() {
+  local rc=0
+  if BIN=$(find_chromium); then
+    echo "OK    chromium: $BIN ($("$BIN" --version 2>/dev/null | head -1))"
+  else
+    echo "FAIL  chromium not installed — apt install chromium-browser"; rc=1
+  fi
+
+  if WV=$(find_widevine); then
+    echo "OK    widevine: $WV"
+  else
+    echo "FAIL  Widevine CDM not found."
+    echo "      Without it Netflix, Prime, Paramount+, YouTube TV and ESPN all"
+    echo "      load their UI and then fail at play with a DRM error. Install"
+    echo "      with: sudo apt install libwidevinecdm0  (or reinstall"
+    echo "      chromium-browser, which bundles it on Raspberry Pi OS)."
+    rc=1
+  fi
+
+  if command -v cage >/dev/null 2>&1; then
+    echo "OK    cage: $(command -v cage)"
+  else
+    echo "FAIL  cage not installed — apt install cage"
+    echo "      cage is the one-window Wayland compositor that gives Chromium a"
+    echo "      fullscreen surface without running a whole desktop."
+    rc=1
+  fi
+
+  if [ -w /dev/dri/card0 ] || [ -w /dev/dri/card1 ]; then
+    echo "OK    DRM device writable by $(id -un)"
+  else
+    echo "WARN  no writable /dev/dri device; add this user to the 'video' and"
+    echo "      'render' groups"
+  fi
+  return $rc
+}
+
+cmd_list() {
+  printf '%-12s %-14s %s\n' SERVICE NAME URL
+  for k in $(printf '%s\n' "${!URLS[@]}" | sort); do
+    printf '%-12s %-14s %s\n' "$k" "${NAMES[$k]:-$k}" "${URLS[$k]}"
+  done
+}
+
+cmd_stop() {
+  systemctl stop 'streampi-app@*.service' 2>/dev/null
+  true
+}
+
+launch() {
+  local svc="$1"
+  local url="${URLS[$svc]:-}"
+  [ -n "$url" ] || { log "unknown service '$svc' (try --list)"; return 2; }
+
+  local bin; bin=$(find_chromium) || { log "chromium not installed"; return 1; }
+  command -v cage >/dev/null 2>&1 || { log "cage not installed"; return 1; }
+
+  local profile="$PROFILES/$svc"
+  mkdir -p "$profile"
+
+  if ! find_widevine >/dev/null; then
+    log "WARNING: Widevine CDM not found; playback will fail on this service"
+  fi
+
+  # Chromium's own cache is separate from the YouTube video cache and will grow
+  # without bound on a 30 GB disk if left alone. 400 MB per service is enough
+  # for smooth browsing and bounded across six services.
+  local flags=(
+    --start-fullscreen
+    --app="$url"
+    --user-data-dir="$profile"
+    --disk-cache-dir="$profile/cache"
+    --disk-cache-size=419430400
+    --no-first-run
+    --no-default-browser-check
+    --disable-session-crashed-bubble
+    --disable-infobars
+    --disable-features=Translate,TranslateUI
+    --autoplay-policy=no-user-gesture-required
+    --ozone-platform=wayland
+    --enable-wayland-ime
+    # Audio goes through the ALSA default from /etc/asound.conf, which is
+    # already pinned to vc4-HDMI-0, so Chromium needs no device flag.
+    --password-store=basic
+  )
+
+  log "launching ${NAMES[$svc]:-$svc}"
+  # cage exits when its single client exits, which is the signal systemd uses to
+  # bring Kodi back via ExecStopPost.
+  exec "$bin" "${flags[@]}"
+}
+
+case "${1:-}" in
+  ""|-h|--help)
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0 ;;
+  --list)  cmd_list ;;
+  --check) cmd_check ;;
+  --stop)  cmd_stop ;;
+  -*)      log "unknown option $1"; exit 2 ;;
+  *)       launch "$1" ;;
+esac

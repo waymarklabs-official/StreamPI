@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Point Kodi's audio output at the vc4-HDMI-0 ALSA device.
+
+Kodi only reads guisettings.xml at startup and rewrites the whole file on exit,
+so this must run with Kodi stopped or the change is clobbered. The installer
+handles that ordering; if you run it by hand, stop Kodi first.
+
+Usage:
+    streampi-audio-setup [--user USER] [--dry-run]
+"""
+
+import argparse
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+
+# Kodi's ALSA sink names devices as "ALSA:<alsa-device-string>". We want the
+# "hdmi:" plugin rather than "hw:" because vc4-hdmi only accepts IEC958-framed
+# audio -- see the comment block in config/asound.conf.
+PREFERRED = [
+    "ALSA:hdmi:CARD=vc4hdmi0,DEV=0",   # explicit, survives card renumbering
+    "ALSA:sysdefault:CARD=vc4hdmi0",   # fallback if the hdmi plugin is absent
+    "ALSA:default",                    # our asound.conf already points here
+]
+
+SETTINGS = {
+    # The output device itself -- the whole point of this script.
+    "audiooutput.audiodevice": None,          # filled in after probing
+    # Kodi's GUI click/notification sounds also go out the same device.
+    "audiooutput.guisoundmode": "1",
+    # 2.0 stereo. Most TVs downmix anything else badly over HDMI ARC.
+    "audiooutput.channels": "1",
+    # Leave passthrough off: with it on, Kodi hands undecoded AC3/E-AC3 to the
+    # TV, and a TV that lies about its capabilities gives you silence. Turn it on
+    # in Settings > System > Audio only after confirming your TV decodes it.
+    "audiooutput.passthrough": "false",
+    # Keep a silent stream open so the HDMI audio sink never sleeps. Without it
+    # the first second of every video is swallowed while the TV re-syncs.
+    # -1 means "always" in Kodi's enum.
+    "audiooutput.streamsilence": "-1",
+    # Highest resample quality the Pi can afford; it is cheap for stereo.
+    "audiooutput.processquality": "2",
+}
+
+
+def probe_alsa_device():
+    """Return the best available ALSA device string, or None if vc4hdmi0 is gone."""
+    try:
+        out = subprocess.run(
+            ["aplay", "-L"], capture_output=True, text=True, timeout=10
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+
+    # aplay -L lists one device name per unindented line.
+    available = {ln.strip() for ln in out.splitlines() if ln and not ln[0].isspace()}
+
+    for cand in PREFERRED:
+        alsa_name = cand.split("ALSA:", 1)[1]
+        # "default" always exists; the CARD= forms only if the card enumerated.
+        if alsa_name in available or alsa_name == "default":
+            return cand
+
+    # Last resort: confirm the card exists at all via aplay -l.
+    try:
+        listing = subprocess.run(
+            ["aplay", "-l"], capture_output=True, text=True, timeout=10
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if "vc4hdmi0" in listing:
+        return PREFERRED[0]
+    return None
+
+
+def load_or_create(path):
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        try:
+            tree = ET.parse(path)
+            root = tree.getroot()
+            if root.tag != "settings":
+                raise ET.ParseError(f"root element is <{root.tag}>, expected <settings>")
+            return tree, root
+        except ET.ParseError as exc:
+            # A corrupt guisettings.xml makes Kodi reset every setting, so keep a
+            # copy and start clean rather than failing.
+            print(f"  guisettings.xml is unparseable ({exc}); starting a fresh one")
+            shutil.copy2(path, path + ".streampi-corrupt")
+    root = ET.Element("settings", {"version": "2"})
+    return ET.ElementTree(root), root
+
+
+def set_setting(root, key, value):
+    """Set <setting id=KEY>VALUE</setting>, returning True if anything changed."""
+    for el in root.findall("setting"):
+        if el.get("id") == key:
+            if el.text == value and "default" not in el.attrib:
+                return False
+            el.text = value
+            # Kodi treats default="true" as "ignore the body", so it must go.
+            el.attrib.pop("default", None)
+            return True
+    el = ET.SubElement(root, "setting", {"id": key})
+    el.text = value
+    return True
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--user", default=os.environ.get("STREAMPI_USER", ""),
+                    help="user whose ~/.kodi to edit")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    user = args.user or os.environ.get("SUDO_USER") or pwd.getpwuid(os.getuid()).pw_name
+    try:
+        ent = pwd.getpwnam(user)
+    except KeyError:
+        sys.exit(f"no such user: {user}")
+
+    device = probe_alsa_device()
+    if device is None:
+        sys.exit(
+            "Could not find the vc4hdmi0 ALSA card.\n"
+            "  The TV was probably off or on the wrong HDMI port at boot, or full\n"
+            "  KMS is not active. Use HDMI port 0 (nearest USB-C), power the TV on,\n"
+            "  reboot, and re-run. Checked with: aplay -l"
+        )
+    print(f"  ALSA output device: {device}")
+
+    settings = dict(SETTINGS)
+    settings["audiooutput.audiodevice"] = device
+
+    path = os.path.join(ent.pw_dir, ".kodi", "userdata", "guisettings.xml")
+    if subprocess.run(["pgrep", "-x", "kodi.bin"], capture_output=True).returncode == 0:
+        sys.exit(
+            "Kodi is running. It rewrites guisettings.xml on exit and would discard\n"
+            "  these changes. Stop it first:  sudo systemctl stop kodi"
+        )
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tree, root = load_or_create(path)
+
+    changed = [k for k, v in settings.items() if set_setting(root, k, v)]
+    if not changed:
+        print("  already configured, nothing to do")
+        return
+
+    if args.dry_run:
+        print(f"  would set: {', '.join(sorted(changed))}")
+        return
+
+    if os.path.exists(path):
+        shutil.copy2(path, path + ".streampi-backup")
+
+    ET.indent(tree, space="    ")
+    tree.write(path, encoding="UTF-8", xml_declaration=True)
+    os.chown(path, ent.pw_uid, ent.pw_gid)
+    os.chmod(path, 0o644)
+    print(f"  set {len(changed)} setting(s) in {path}")
+    for k in sorted(changed):
+        print(f"    {k} = {settings[k]}")
+
+
+if __name__ == "__main__":
+    main()
