@@ -3,7 +3,7 @@ Description=FB-RCS remote to Kodi
 After=bluetooth.target
 
 [Service]
-ExecStart=/usr/bin/python3 /home/lights/fb_remote.py
+ExecStart=/usr/bin/python3 /home/lights/StreamPI/remote/fb_remote.py
 Restart=always
 
 [Install]
