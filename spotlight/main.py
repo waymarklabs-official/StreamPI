@@ -169,7 +169,10 @@ def list_spotlight(catalog, feed):
         if addon_dir not in sys.path:
             sys.path.insert(0, addon_dir)
         from spotlight import Spotlight
-        items = Spotlight(DATA).feed(feed)
+        sp = Spotlight(DATA, offline=True)          # cached copy, instantly
+        items = sp.feed(feed)
+        if sp.stale:
+            refresh_spotlight(addon_dir)
     except Exception as exc:                        # never break the home screen
         xbmc_log(f"spotlight feed '{feed}' failed: {exc}")
         items = []
@@ -192,6 +195,18 @@ def list_spotlight(catalog, feed):
         url = f"{BASE}?action=launch&service={urllib.parse.quote(it['app'])}"
         xbmcplugin.addDirectoryItem(HANDLE, url, li, isFolder=False)
     xbmcplugin.endOfDirectory(HANDLE, cacheToDisc=False)
+
+
+def refresh_spotlight(addon_dir):
+    """Update stale Spotlight data in the background, for the next visit.
+    A separate process, so the home screen never waits on the network."""
+    try:
+        subprocess.Popen(["/usr/bin/python3", os.path.join(addon_dir, "spotlight.py"),
+                          "--refresh", DATA],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError as exc:
+        xbmc_log(f"could not start spotlight refresh: {exc}")
 
 
 def xbmc_log(msg):

@@ -10,10 +10,16 @@ Sources: ESPN's public scoreboard JSON (no key) and TMDB "where to watch"
 (needs a free API key). Everything is cached so the Pi isn't hitting the
 network on every focus change, and a stale cache is used if the network drops.
 
+Kodi reads with offline=True: whatever is cached is shown at once, however
+old, and `python3 spotlight.py --refresh` is started in the background to
+fetch anything stale for next time. On a slow link (ship, hotel) waiting on
+ESPN held the home screen up for 7+ seconds after every app.
+
 This module has no Kodi imports so it can be tested from a normal shell:
     python3 spotlight.py home
 """
 
+import fcntl
 import hashlib
 import json
 import os
@@ -59,8 +65,10 @@ TMDB_TTL = 6 * 3600
 # ---------------------------------------------------------------- plumbing --
 
 class Spotlight:
-    def __init__(self, data_dir, config=None, fetch=None, now=None):
+    def __init__(self, data_dir, config=None, fetch=None, now=None, offline=False):
         self.dir = data_dir
+        self.offline = offline      # never wait on the network if cache exists
+        self.stale = False          # offline read skipped something; refresh it
         self.cache = os.path.join(data_dir, "cache")
         self.art = os.path.join(data_dir, "art")
         os.makedirs(self.cache, exist_ok=True)
@@ -81,8 +89,11 @@ class Spotlight:
     def _cached(self, key, ttl, url, headers=None):
         """Fetch JSON with a file cache. Falls back to stale data on failure."""
         path = os.path.join(self.cache, hashlib.sha1(key.encode()).hexdigest() + ".json")
-        fresh = os.path.exists(path) and time.time() - os.path.getmtime(path) < ttl
-        if not fresh:
+        have = os.path.exists(path)
+        fresh = have and time.time() - os.path.getmtime(path) < ttl
+        if not fresh and have and self.offline:
+            self.stale = True       # show the old copy now, refresh later
+        elif not fresh:
             try:
                 data = self._fetch(url, headers or {})
                 with open(path, "w", encoding="utf-8") as fh:
@@ -247,6 +258,9 @@ class Spotlight:
         out = os.path.join(self.art, f"game-{ev_id}.jpg")
         if os.path.exists(out):
             return out
+        if self.offline:            # drawing needs logo downloads: do it later
+            self.stale = True
+            return home.get("logo", "")
         try:
             from PIL import Image, ImageDraw, ImageFilter
         except ImportError:
@@ -384,8 +398,29 @@ def _dim(rgb, factor=0.7):
     return tuple(int(c * factor) for c in rgb)
 
 
+FEEDS = ("home", "sports", "live", "streaming")
+
+
+def refresh(data_dir):
+    """Fetch everything stale and draw missing art. One run at a time."""
+    try:
+        lock = open(os.path.join(data_dir, ".refresh.lock"), "w")
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return                      # another refresh is already running
+    sp = Spotlight(data_dir)
+    for name in FEEDS:
+        try:
+            sp.feed(name)
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     import sys
     data_dir = os.path.expanduser("~/.kodi/userdata/addon_data/plugin.video.streampi.apps")
+    if sys.argv[1:2] == ["--refresh"]:
+        refresh(sys.argv[2] if len(sys.argv) > 2 else data_dir)
+        sys.exit(0)
     for item in Spotlight(data_dir).feed(sys.argv[1] if len(sys.argv) > 1 else "home"):
         print(f"{item['title']:<40} {item['tagline']}  -> {item['app']}")
