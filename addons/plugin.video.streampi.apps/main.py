@@ -13,11 +13,17 @@ apps.json with a "kodi" path (like YouTube) open that Kodi add-on instead.
 
 Categories, order and taglines live in resources/apps.json. A service added to
 /etc/streampi/apps.conf but not to apps.json still shows up under Streaming.
+
+Rows learn: every launch is logged to usage.json in the add-on's data folder,
+and each row puts the apps you open most, and most recently, first. Apps never
+opened keep their apps.json order at the end. Delete usage.json to reset.
 """
 
 import json
+import os
 import subprocess
 import sys
+import time
 import urllib.parse
 
 import xbmcaddon
@@ -31,6 +37,43 @@ BASE = sys.argv[0]
 LAUNCHER = "/usr/local/bin/streampi-app"
 RES = xbmcvfs.translatePath(ADDON.getAddonInfo("path")) + "/resources/"
 DATA = xbmcvfs.translatePath(ADDON.getAddonInfo("profile"))
+USAGE = os.path.join(DATA, "usage.json")
+
+# A launch counts half as much after this many days, so a new habit overtakes
+# an old one within a couple of weeks.
+HALF_LIFE_DAYS = 7
+KEEP_LAUNCHES = 50          # per app; older ones barely count anyway
+
+
+def load_usage():
+    try:
+        with open(USAGE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def record_launch(app_id):
+    usage = load_usage()
+    usage[app_id] = (usage.get(app_id, []) + [int(time.time())])[-KEEP_LAUNCHES:]
+    try:
+        os.makedirs(DATA, exist_ok=True)
+        tmp = USAGE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(usage, fh)
+        os.replace(tmp, USAGE)
+    except OSError as exc:                          # never block a launch
+        xbmc_log(f"could not save usage: {exc}")
+
+
+def by_habit(apps):
+    """Most-used, most-recent first; ties and unused apps keep their order."""
+    usage, now = load_usage(), time.time()
+
+    def score(app):
+        return sum(0.5 ** ((now - t) / 86400 / HALF_LIFE_DAYS)
+                   for t in usage.get(app["id"], []))
+    return sorted(apps, key=score, reverse=True)    # stable sort
 
 
 def load_catalog():
@@ -93,6 +136,7 @@ def list_apps(catalog, cat_id):
     apps = all_apps(catalog)
     if cat_id != "all":
         apps = [a for a in apps if cat_id in a.get("cats", [])]
+    apps = by_habit(apps)
 
     xbmcplugin.setPluginCategory(HANDLE, names.get(cat_id, "All Apps"))
     xbmcplugin.setContent(HANDLE, "videos")
@@ -113,7 +157,8 @@ def list_apps(catalog, cat_id):
             url = f"{BASE}?action=launch&service={urllib.parse.quote(app['id'])}"
             xbmcplugin.addDirectoryItem(HANDLE, url, li, isFolder=False)
 
-    xbmcplugin.endOfDirectory(HANDLE)
+    # No disk cache, or the row would keep yesterday's order.
+    xbmcplugin.endOfDirectory(HANDLE, cacheToDisc=False)
 
 
 def list_spotlight(catalog, feed):
@@ -155,6 +200,7 @@ def xbmc_log(msg):
 
 
 def launch(svc):
+    record_launch(svc)
     try:
         subprocess.Popen(["sudo", "-n", "/usr/bin/systemctl", "start", "--no-block", f"streampi-app@{svc}.service"], stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
