@@ -9,8 +9,7 @@
 
   "apps": {
     "youtubetv": {"cats": ["live", "sports"],      "tagline": "Live TV, local channels and sports"},
-    "youtube":   {"cats": ["streaming"],           "tagline": "Videos, creators and subscriptions",
-                  "name": "YouTube", "kodi": "plugin://plugin.video.youtube/"},
+    "youtube":   {"cats": ["streaming"],           "tagline": "Videos, creators and subscriptions"},
     "netflix":   {"cats": ["streaming"],           "tagline": "Movies, series and originals"},
     "prime":     {"cats": ["streaming"],           "tagline": "Movies, series and Thursday Night Football"},
     "paramount": {"cats": ["streaming", "live"],   "tagline": "CBS live, movies and series"},
