@@ -170,6 +170,9 @@ launch() {
     # Audio goes through the ALSA default from /etc/asound.conf, which is
     # already pinned to vc4-HDMI-0, so Chromium needs no device flag.
     --password-store=basic
+    # Dark browser theme: the blank window before a site paints is dark
+    # instead of a full-screen white flash. Sites also see "prefers dark".
+    --force-dark-mode
   )
   [ -n "${AGENTS[$svc]:-}" ] && flags+=(--user-agent="${AGENTS[$svc]}")
 

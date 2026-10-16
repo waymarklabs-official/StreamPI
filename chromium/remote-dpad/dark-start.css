@@ -1,0 +1,4 @@
+/* StreamPI: paint black until the site draws its own background, so
+   opening an app on the TV doesn't flash white. Sites that set their own
+   background override this; only pages that set none stay black. */
+html { background-color: #000; }
