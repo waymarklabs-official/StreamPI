@@ -391,6 +391,7 @@ def find_device():
 def classify(pts):
     (sx, sy), (ex, ey) = pts[0], pts[-1]
     dx, dy = ex - sx, ey - sy
+    print(f"[touch] start=({sx},{sy}) end=({ex},{ey}) points={len(pts)}", flush=True)
     if max(abs(dx), abs(dy)) >= SWIPE_MIN:
         if abs(dy) > abs(dx):
             return "Input.Up" if dy > 0 else "Input.Down"

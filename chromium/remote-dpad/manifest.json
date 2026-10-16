@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Remote D-pad",
-  "version": "1.4",
+  "version": "1.5",
   "description": "Arrow keys jump between clickable things; Enter clicks. For a TV remote.",
   "content_scripts": [
     {
@@ -11,7 +11,7 @@
     },
     {
       "matches": ["<all_urls>"],
-      "exclude_matches": ["*://open.spotify.com/*"],
+      "exclude_matches": ["*://open.spotify.com/*", "*://www.youtube.com/tv*"],
       "js": ["dpad.js"],
       "run_at": "document_start"
     },
