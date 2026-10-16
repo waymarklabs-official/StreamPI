@@ -146,9 +146,43 @@ def launch_kodi():
     extra = [f"{k}={v}" for k, v in KODI_ENV.items()]
     as_user(["env", *extra, *KODI_CMD], wait=False)
 
+def browser_pid():
+    """PID of Chromium's main browser process (not a renderer/helper)."""
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                data = f.read()
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read()
+        except OSError:
+            continue
+        name = data[data.find("(") + 1:data.rfind(")")]
+        if name in CHROMIUM_NAMES and b"--type=" not in cmd:
+            return int(pid)
+    return None
+
 def close_chromium():
+    # Ask Chromium to quit first (SIGTERM = a normal shutdown that saves its
+    # data). Killing it outright left storage half-written, and the YouTube TV
+    # app treats that as an unclean exit and signs you out. Cage, and with it
+    # the app unit, exits once Chromium does; Kodi then comes back.
+    threading.Thread(target=_close_chromium, daemon=True).start()
+
+def _close_chromium():
+    pid = browser_pid()
+    if pid:
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            pass
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and chromium_running():
+            time.sleep(0.25)
     if appliance():
-        # Stopping the app unit closes Chromium and brings Kodi straight back.
+        # Still up after 8 s (or no browser found): stop the unit, which
+        # forces it closed and brings Kodi straight back.
         subprocess.run(["systemctl", "stop", "streampi-app@*.service"])
     subprocess.run(["pkill", "-x", CHROMIUM])   # desktop mode, or anything left
 

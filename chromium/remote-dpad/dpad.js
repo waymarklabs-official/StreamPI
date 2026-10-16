@@ -12,6 +12,10 @@
   const DIRS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
 
   let current = null, lastRect = null, box = null;
+  // The outline only needs redrawing while something moves: right after a key
+  // press (smooth scrolling) or while the page scrolls. Redrawing every frame
+  // forever forced a layout 60 times a second on huge pages.
+  let followUntil = 0, ticking = false;
   const handled = new Set();
 
   // ---------- helpers ----------
@@ -30,6 +34,27 @@
     for (let n = tw.nextNode(); n; n = tw.nextNode()) {
       out.push(n);
       if (n.shadowRoot) allElements(n.shadowRoot, out);
+    }
+    return out;
+  }
+
+  // Elements near the screen only. Big apps (YouTube TV, Netflix) have
+  // thousands of rows and tiles off-screen; measuring each one on every key
+  // press is what made the highlight lag. A box far outside the screen is
+  // skipped along with everything inside it, so whole rows cost one check.
+  function nearElements(root, band, out = []) {
+    const far = el => {
+      const r = el.getBoundingClientRect();
+      return (r.width || r.height) &&
+        (r.bottom < band.top || r.top > band.bottom ||
+         r.right < band.left || r.left > band.right);
+    };
+    const tw = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+      acceptNode: n => far(n) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+    });
+    for (let n = tw.nextNode(); n; n = tw.nextNode()) {
+      out.push(n);
+      if (n.shadowRoot) nearElements(n.shadowRoot, band, out);
     }
     return out;
   }
@@ -60,12 +85,15 @@
       if (!s) { s = getComputedStyle(el); cache.set(el, s); }
       return s;
     };
+    // One screen of margin is plenty: the next item is always close by, and
+    // scrollIntoView brings it on screen.
+    const band = { top: -vh, bottom: 2 * vh, left: -vw, right: 2 * vw };
     const found = [];
-    for (const el of allElements()) {
+    for (const el of nearElements(document, band)) {
       if (el === box) continue;
       const r = el.getBoundingClientRect();
       if (r.width < 6 || r.height < 6 || r.width * r.height > maxArea) continue;
-      if (r.bottom < -2 * vh || r.top > 3 * vh || r.right < -2 * vw || r.left > 3 * vw) continue;
+      if (r.bottom < band.top || r.top > band.bottom || r.right < band.left || r.left > band.right) continue;
       const s = style(el);
       if (s.visibility === 'hidden' || s.opacity === '0' || s.pointerEvents === 'none') continue;
       if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
@@ -141,6 +169,7 @@
     try { el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }); } catch (_) {}
     if (el.tabIndex >= 0) { try { el.focus({ preventScroll: true }); } catch (_) {} }
     ensureBox();
+    follow(1000);   // long enough for a smooth scroll to finish
   }
 
   // ---------- highlight outline ----------
@@ -152,7 +181,13 @@
       'border:4px solid #3ea6ff;border-radius:10px;' +
       'box-shadow:0 0 0 3px rgba(0,0,0,.6),0 0 18px #3ea6ff;' +
       'transition:all .12s ease-out;display:none;';
-    requestAnimationFrame(tick);
+    addEventListener('scroll', () => follow(300), { capture: true, passive: true });
+    addEventListener('resize', () => follow(300), { passive: true });
+  }
+
+  function follow(ms) {
+    followUntil = Math.max(followUntil, performance.now() + ms);
+    if (box && !ticking) { ticking = true; requestAnimationFrame(tick); }
   }
 
   function tick() {
@@ -175,7 +210,8 @@
       current = null;
       box.style.display = 'none';
     }
-    requestAnimationFrame(tick);
+    if (performance.now() < followUntil) requestAnimationFrame(tick);
+    else ticking = false;
   }
 
   // ---------- clicking ----------
@@ -248,7 +284,7 @@
     }
 
     consume(e);
-    if (e.key === 'Enter') activate(current);
+    if (e.key === 'Enter') { activate(current); follow(1000); }
     else move(dir);
   }, true);
 

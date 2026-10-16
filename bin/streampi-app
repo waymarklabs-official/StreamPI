@@ -25,7 +25,9 @@ declare -A URLS=(
   [netflix]="https://www.netflix.com/browse"
   [prime]="https://www.amazon.com/gp/video/storefront"
   [paramount]="https://www.paramountplus.com/"
-  [youtubetv]="https://tv.youtube.com/"
+  # YouTube TV's own TV app (the one smart TVs run): built for a d-pad. The
+  # tv.youtube.com website was too heavy to steer with the remote on a Pi.
+  [youtubetv]="https://www.youtube.com/tv/upg"
   [spotify]="https://open.spotify.com/"
   [espn]="https://www.espn.com/watch/"
   # The TV ("leanback") interface: built for a d-pad, no mouse needed.
@@ -37,11 +39,13 @@ declare -A NAMES=(
   [netflix]="Netflix" [prime]="Prime Video" [paramount]="Paramount+" [wifilogin]="Wi-Fi Login"
   [youtubetv]="YouTube TV" [spotify]="Spotify" [espn]="ESPN" [youtube]="YouTube"
 )
-# youtube.com/tv sends desktop browsers back to youtube.com, so YouTube has
-# to say it is a TV. Chromium-based Tizen string, so YouTube picks codecs
+# youtube.com/tv sends desktop browsers back to youtube.com, so YouTube and
+# YouTube TV have to say they are a TV. Chromium-based Tizen string, so YouTube picks codecs
 # Chromium can actually play.
+TV_AGENT="Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) 85.0.4183.93/6.0 TV Safari/537.36"
 declare -A AGENTS=(
-  [youtube]="Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) 85.0.4183.93/6.0 TV Safari/537.36"
+  [youtube]="$TV_AGENT"
+  [youtubetv]="$TV_AGENT"
 )
 
 # Operator overrides without editing this file.

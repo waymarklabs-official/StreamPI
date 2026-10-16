@@ -1,0 +1,7 @@
+# StreamPI: drop the accessibility flag Raspberry Pi OS adds in 00-rpi-vars.
+# It makes Chromium mirror every page change into an accessibility tree, which
+# on huge pages like YouTube TV makes each remote press lag. Sorted last
+# ("zz") so it runs after 00-rpi-vars; a package update cannot undo it.
+# The chromium wrapper is /bin/sh (dash): keep this POSIX, no bash-isms.
+CHROMIUM_FLAGS=$(printf '%s\n' "$CHROMIUM_FLAGS" | sed 's/--force-renderer-accessibility//g')
+export CHROMIUM_FLAGS
