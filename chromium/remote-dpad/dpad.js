@@ -77,7 +77,35 @@
   }
 
   // ---------- find clickable things ----------
-  function collect() {
+  // Where the next item can be. Searching only that way (one screen deep)
+  // keeps big pages like Spotify cheap: a row change used to measure every
+  // element a screen in all directions, 1.3 s per press on the Pi.
+  function searchBand(from, dir) {
+    const vw = innerWidth, vh = innerHeight;
+    if (!from) return { top: 0, bottom: vh, left: 0, right: vw };
+    const wide = { left: -vw / 2, right: vw * 1.5 }, tall = { top: from.top - vh / 2, bottom: from.bottom + vh / 2 };
+    switch (dir) {
+      case 'down':  return { ...wide, top: from.top + 2, bottom: from.bottom + vh };
+      case 'up':    return { ...wide, top: from.top - vh, bottom: from.bottom - 2 };
+      case 'right': return { ...tall, left: from.left + 2, right: from.right + vw };
+      default:      return { ...tall, left: from.left - vw, right: from.right - 2 };
+    }
+  }
+
+  // Fast path: let the browser find things that are clickable by markup
+  // (links, buttons, roles) with its native selector engine, and measure only
+  // those. On Spotify that's a few hundred elements instead of ~3,000.
+  function quickElements() {
+    const roots = [document];
+    for (const el of document.querySelectorAll('*')) if (el.shadowRoot) roots.push(el.shadowRoot);
+    for (let i = 1; i < roots.length; i++)        // shadow roots inside shadow roots
+      for (const el of roots[i].querySelectorAll('*')) if (el.shadowRoot) roots.push(el.shadowRoot);
+    const out = [];
+    for (const r of roots) for (const el of r.querySelectorAll(SEL)) out.push(el);
+    return out;
+  }
+
+  function collect(band, quick) {
     const vw = innerWidth, vh = innerHeight, maxArea = vw * vh * 0.6;
     const cache = new Map();
     const style = el => {
@@ -85,19 +113,16 @@
       if (!s) { s = getComputedStyle(el); cache.set(el, s); }
       return s;
     };
-    // One screen of margin is plenty: the next item is always close by, and
-    // scrollIntoView brings it on screen.
-    const band = { top: -vh, bottom: 2 * vh, left: -vw, right: 2 * vw };
     const found = [];
-    for (const el of nearElements(document, band)) {
+    for (const el of quick ? quickElements() : nearElements(document, band)) {
       if (el === box) continue;
       const r = el.getBoundingClientRect();
       if (r.width < 6 || r.height < 6 || r.width * r.height > maxArea) continue;
       if (r.bottom < band.top || r.top > band.bottom || r.right < band.left || r.left > band.right) continue;
-      const s = style(el);
-      if (s.visibility === 'hidden' || s.opacity === '0' || s.pointerEvents === 'none') continue;
       if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
       let ok = el.matches(SEL);
+      const s = style(el);
+      if (s.visibility === 'hidden' || s.opacity === '0' || s.pointerEvents === 'none') continue;
       if (!ok && s.cursor === 'pointer') {
         // cursor is inherited: only count the outermost element that turns it on
         const p = parentOf(el);
@@ -138,9 +163,17 @@
   }
 
   function move(dir) {
-    const cands = collect();
+    let from = current && current.isConnected ? current.getBoundingClientRect() : null;
+    if (from && !from.width) from = null;
+    const band = searchBand(from, dir);
+    let cands = collect(band, true);
+    // Nothing marked up as clickable that way: fall back to the slow scan,
+    // which also finds plain elements styled with a pointer cursor.
+    if (!cands.some(c => c.el !== current && !contains(c.el, current) &&
+                         (!from || score(from, c.r, dir) < Infinity))) {
+      cands = collect(band, false);
+    }
     if (!cands.length) return;
-    const from = current && current.isConnected ? current.getBoundingClientRect() : null;
     if (!from || !from.width) {
       // nothing highlighted yet: start near the last spot, or the middle of the screen
       const ref = lastRect || { left: innerWidth / 2, right: innerWidth / 2,
