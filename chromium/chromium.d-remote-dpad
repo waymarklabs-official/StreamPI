@@ -1,0 +1,1 @@
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --enable-spatial-navigation --load-extension=/home/lights/StreamPI/chromium/remote-dpad --kiosk"
