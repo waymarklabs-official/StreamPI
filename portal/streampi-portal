@@ -42,9 +42,17 @@ PROBE_PATHS = {
     "/canonical.html", "/success.txt",                # Firefox / misc
 }
 
+# Where the box is (home / cruise / hotel / plane), for the location service
+# that points weather at the right place. Owned by the Kodi user so the Kodi
+# Travel Mode tile can change it too. The time zone is never derived from it.
+TRAVEL_FILE = "/var/lib/streampi/travel.json"
+TRAVEL_MODES = ("home", "cruise", "hotel", "plane")
+TRAVEL_FIELDS = ("line", "ship", "city", "flight")
+
 _scan_cache = []
 _server = None
 _connected = False
+_preview = False               # --preview: serve the page only, never touch WiFi
 
 
 def run(args, **kw):
@@ -80,6 +88,38 @@ def has_connectivity():
     """
     out = run(["nmcli", "-t", "-f", "CONNECTIVITY", "general"]).stdout.strip()
     return out in ("full", "portal")
+
+
+def load_travel():
+    try:
+        with open(TRAVEL_FILE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {"mode": "home"}
+
+
+def save_travel(form):
+    """Store the trip choice from the setup form. Bad input falls back to home."""
+    mode = form.get("mode", ["home"])[0]
+    travel = {"mode": mode if mode in TRAVEL_MODES else "home",
+              "set": int(time.time())}
+    for key in TRAVEL_FIELDS:
+        value = form.get(key, [""])[0].strip()[:80]
+        if value:
+            travel[key] = value
+    tmp = TRAVEL_FILE + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(TRAVEL_FILE), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(travel, fh, indent=1)
+        os.replace(tmp, TRAVEL_FILE)
+        try:
+            shutil.chown(TRAVEL_FILE, "lights", "lights")
+        except (LookupError, OSError):
+            pass
+        log(f"travel mode: {travel}")
+    except OSError as exc:
+        log(f"could not save travel mode: {exc}")
 
 
 def ap_password():
@@ -250,6 +290,18 @@ PAGE = """<!doctype html>
  .err{background:#3a1d22;color:#ffb4b4;display:block!important}
  .ok{background:#15301f;color:#9ff0bd;display:block!important}
  details{margin-top:18px;color:#9aa3b5}
+ select{width:100%;padding:13px;border-radius:9px;border:1px solid #2b3142;
+      background:#11131a;color:#eef1f7;font:inherit;margin-bottom:14px}
+ .trip{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:14px}
+ .trip button{background:#11131a;border:1px solid #2b3142;color:#eef1f7;border-radius:11px;
+      padding:13px 8px;font:inherit;cursor:pointer;display:flex;flex-direction:column;
+      align-items:center;gap:3px;transition:border-color .15s,background .15s}
+ .trip button .ic{font-size:28px;line-height:1}
+ .trip button .t{font-size:14px;color:#9aa3b5}
+ .trip button[aria-pressed=true]{border-color:#4b8dff;background:#18233d}
+ .trip button[aria-pressed=true] .t{color:#cfe0ff}
+ .extra{display:none}
+ .hint{font-size:13px;color:#79839a;margin:-8px 0 14px}
  summary{cursor:pointer;padding:8px 0}
 </style>
 <h1>Connect StreamPI to WiFi</h1>
@@ -261,6 +313,34 @@ PAGE = """<!doctype html>
   <label>Password</label>
   <input id=psk name=psk type=password autocomplete=off
          placeholder="leave blank if the network is open">
+  <label>Where is this StreamPI?</label>
+  <div class=trip id=trip>
+    <button type=button data-mode=home aria-pressed=true><span class=ic>&#x1F3E0;</span>Home<span class=t>automatic</span></button>
+    <button type=button data-mode=cruise aria-pressed=false><span class=ic>&#x1F6A2;</span>Cruise<span class=t>ship tracking</span></button>
+    <button type=button data-mode=hotel aria-pressed=false><span class=ic>&#x1F3E8;</span>Hotel<span class=t>pick a city</span></button>
+    <button type=button data-mode=plane aria-pressed=false><span class=ic>&#x2708;&#xFE0F;</span>Plane<span class=t>flight tracking</span></button>
+  </div>
+  <p class=hint id=triphint>Weather and Spotlight use your normal location.</p>
+  <div class=extra data-for=cruise>
+    <label>Cruise line</label>
+    <select id=line>
+      <option>Virgin Voyages</option><option>Royal Caribbean</option>
+      <option>Carnival</option><option>Norwegian</option><option>MSC</option>
+      <option>Celebrity</option><option>Princess</option><option>Disney</option>
+      <option>Holland America</option><option>Other</option>
+    </select>
+    <label>Ship</label>
+    <input id=ship list=ships autocomplete=off placeholder="e.g. Valiant Lady">
+    <datalist id=ships></datalist>
+  </div>
+  <div class=extra data-for=hotel>
+    <label>City</label>
+    <input id=city autocomplete=off placeholder="e.g. Lisbon, Portugal">
+  </div>
+  <div class=extra data-for=plane>
+    <label>Flight number</label>
+    <input id=flight autocomplete=off placeholder="e.g. DL1234" style="text-transform:uppercase">
+  </div>
   <button class=go id=go>Connect</button>
 </form>
 <div id=msg></div>
@@ -295,17 +375,65 @@ fetch('/scan.json').then(r=>r.json()).then(list=>{
 document.getElementById('manual').onclick=e=>{
   e.preventDefault(); pick({ssid:'',secure:true});
 };
+const SHIPS={
+  'Virgin Voyages':['Scarlet Lady','Valiant Lady','Resilient Lady','Brilliant Lady'],
+};
+const HINTS={
+  home:'Weather and Spotlight use your normal location.',
+  cruise:"Weather follows the ship's position. The clock stays on your home time.",
+  hotel:'Weather shows this city. The clock stays on your home time.',
+  plane:'Weather follows the flight. The clock stays on your home time.'
+};
+let mode='home';
+const trip=document.getElementById('trip'),line=document.getElementById('line'),
+      ship=document.getElementById('ship'),city=document.getElementById('city'),
+      flight=document.getElementById('flight');
+function setMode(m){
+  mode=m;
+  trip.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.mode===m));
+  document.querySelectorAll('.extra').forEach(x=>x.style.display=x.dataset.for===m?'block':'none');
+  document.getElementById('triphint').textContent=HINTS[m];
+}
+trip.onclick=e=>{const b=e.target.closest('button'); if(b) setMode(b.dataset.mode);};
+function fillShips(){
+  const dl=document.getElementById('ships'); dl.innerHTML='';
+  (SHIPS[line.value]||[]).forEach(n=>{const o=document.createElement('option');o.value=n;dl.appendChild(o);});
+}
+line.onchange=()=>{ship.value='';fillShips();};
+fillShips();
+fetch('/travel.json').then(r=>r.json()).then(t=>{
+  if(!t||!t.mode) return;
+  if(t.line) line.value=t.line; fillShips();
+  ship.value=t.ship||''; city.value=t.city||''; flight.value=t.flight||'';
+  setMode(t.mode);
+}).catch(()=>{});
+function travelError(){
+  if(mode==='cruise'&&!ship.value.trim()) return 'Pick or type the ship name.';
+  if(mode==='hotel'&&!city.value.trim()) return 'Type the city.';
+  if(mode==='plane'&&!/^[A-Za-z0-9]{2,3}[0-9]{1,4}[A-Za-z]?$/.test(flight.value.trim().replace(/ /g,'')))
+    return 'Type the flight number, like DL1234.';
+  return '';
+}
+
 f.onsubmit=async e=>{
   e.preventDefault();
   if(!ssid.value.trim()){msg.className='err';msg.textContent='Enter a network name.';return}
+  const te=travelError();
+  if(te){msg.className='err';msg.textContent=te;return}
   go.disabled=true; go.textContent='Connecting\\u2026';
   msg.className=''; msg.style.display='none';
   try{
     const r=await fetch('/connect',{method:'POST',
       headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body:new URLSearchParams({ssid:ssid.value,psk:psk.value})});
+      body:new URLSearchParams({ssid:ssid.value,psk:psk.value,mode:mode,
+        line:line.value,ship:ship.value.trim(),city:city.value.trim(),
+        flight:flight.value.trim().replace(/ /g,'').toUpperCase()})});
     const d=await r.json();
-    if(d.ok){
+    if(d.ok&&d.preview){
+      msg.className='ok';
+      msg.textContent='Saved: '+mode+'. (Preview \u2014 WiFi was not changed.)';
+      go.disabled=false; go.textContent='Connect';
+    }else if(d.ok){
       msg.className='ok';
       msg.textContent='Connected. StreamPI is starting up \\u2014 check your TV. '+
                       'This network will drop in a moment, which is expected.';
@@ -347,6 +475,9 @@ class Handler(BaseHTTPRequestHandler):
             # 302 rather than 204: the redirect is what opens the sign-in sheet.
             self._send(302, b"", extra={"Location": f"http://{AP_ADDR}/"})
             return
+        if path == "/travel.json":
+            self._send(200, json.dumps(load_travel()).encode(), "application/json")
+            return
         if path == "/scan.json":
             self._send(200, json.dumps(_scan_cache).encode(), "application/json")
             return
@@ -379,6 +510,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200,
                        b'{"ok":false,"error":"WPA passwords are 8-63 characters."}',
                        "application/json")
+            return
+
+        save_travel(form)
+        if _preview:
+            self._send(200, b'{"ok":true,"preview":true}', "application/json")
             return
 
         log(f"attempting connection to {ssid!r}")
@@ -423,7 +559,33 @@ def try_connect(ssid, psk):
     return False
 
 
+def preview(port):
+    """Serve the setup page on the current network without touching WiFi,
+    for trying the page from a phone (e.g. over Tailscale). Connect only
+    saves the travel choice."""
+    global _scan_cache, _preview
+    _preview = True
+    out = run(["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"]).stdout
+    seen = set()
+    for line in out.splitlines():
+        parts = re.split(r"(?<!\\):", line)
+        if len(parts) >= 3 and parts[0] and parts[0] not in seen:
+            seen.add(parts[0])
+            _scan_cache.append({"ssid": parts[0].replace("\\:", ":"),
+                                "signal": int(parts[1] or 0),
+                                "secure": bool(parts[2].strip())})
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    log(f"preview on port {port} (WiFi untouched); Ctrl+C to stop")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def main():
+    if sys.argv[1:2] == ["--preview"]:
+        return preview(int(sys.argv[2]) if len(sys.argv) > 2 else 8099)
     os.makedirs(STATE_DIR, exist_ok=True)
 
     if has_connectivity():
