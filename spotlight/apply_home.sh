@@ -12,10 +12,13 @@ NODES=~/.kodi/userdata/addon_data/script.skinvariables/nodes/skin.arctic.fuse.2
 BACKUPS=~/streampi-home-backups
 
 if [[ "${1:-}" == "--undo" ]]; then
-    last=$(ls -1d "$BACKUPS"/* 2>/dev/null | tail -1)
+    # Only the dated layout backups; other StreamPI backups share the folder.
+    last=$(ls -1d "$BACKUPS"/20[0-9][0-9]-*/ 2>/dev/null | tail -1)
     [[ -n "$last" ]] || { echo "No backup found in $BACKUPS"; exit 1; }
     sudo systemctl stop kodi
-    cp "$last"/*.json "$NODES"/
+    cp "$last"*.json "$NODES"/
+    sed -i '/id="script-skinvariables-generator-hash"/d' \
+        ~/.kodi/userdata/addon_data/skin.arctic.fuse.2/settings.xml
     sudo systemctl start kodi
     echo "Restored layout from $last"
     exit 0
@@ -26,6 +29,11 @@ mkdir -p "$BACKUPS/$stamp"
 cp "$NODES"/*.json "$BACKUPS/$stamp"/
 echo "Backed up current layout to $BACKUPS/$stamp"
 
+# Kodi rewrites these files on exit, so it must be stopped while we write.
+# If it isn't running (an app has the screen), leave it that way: starting it
+# would close the app. It picks up the new layout when it comes back.
+kodi_was_up=false
+systemctl is-active --quiet kodi && kodi_was_up=true
 sudo systemctl stop kodi
 
 python3 - "$NODES" <<'PY'
@@ -66,6 +74,7 @@ sidemenu = [
         row("Sports", "sports"),
         row("Streaming", "streaming"),
         row("Music", "music"),
+        row("System", "system"),
     ], SPOT + "home"),
     menu_item("Live TV", "tv.png",          [row("Live TV", "live")],          SPOT + "live"),
     menu_item("Sports", "football.png",     [row("Sports", "sports")],         SPOT + "sports"),
@@ -85,8 +94,14 @@ for name in os.listdir(nodes):
     if name.startswith("skinvariables-shortcut-sidemenu-customnode-"):
         os.remove(os.path.join(nodes, name))
 
-print("Wrote new side menu: Home, Live TV, Sports, Streaming, Music")
+print("Wrote new side menu: Home (with a System row), Live TV, Sports, Streaming, Music")
 PY
 
-sudo systemctl start kodi
+# Arctic Fuse builds the home screen from these files only when its stored
+# fingerprint changes, and the fingerprint doesn't cover them. Dropping it
+# makes the skin rebuild on the next start (takes ~12 s, then reloads).
+sed -i '/id="script-skinvariables-generator-hash"/d' \
+    ~/.kodi/userdata/addon_data/skin.arctic.fuse.2/settings.xml
+
+$kodi_was_up && sudo systemctl start kodi
 echo "Done. Undo any time with:  bash apply_home.sh --undo"
