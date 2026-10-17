@@ -104,7 +104,7 @@ def all_apps(catalog):
     launched = launcher_services()
     apps = []
     for app_id, cfg in catalog["apps"].items():
-        if "kodi" in cfg or app_id in launched:
+        if "kodi" in cfg or "action" in cfg or app_id in launched:
             apps.append({"id": app_id,
                          "name": cfg.get("name") or launched.get(app_id, app_id),
                          **cfg})
@@ -146,6 +146,9 @@ def list_apps(catalog, cat_id):
         li.setArt(art(app["id"]))
         tag = li.getVideoInfoTag()
         tag.setTitle(app["name"])
+        if app.get("action") == "travel":            # show the current trip
+            import travel
+            app = dict(app, tagline=f"Now: {travel.describe()}. {app.get('tagline', '')}")
         tag.setTagLine(app.get("tagline", ""))
         tag.setPlot(app.get("tagline", f"Open {app['name']}."))
         tag.setGenres([names.get(c, c) for c in app.get("cats", [])])
@@ -153,6 +156,9 @@ def list_apps(catalog, cat_id):
 
         if "kodi" in app:
             xbmcplugin.addDirectoryItem(HANDLE, app["kodi"], li, isFolder=True)
+        elif "action" in app:
+            url = f"{BASE}?action={urllib.parse.quote(app['action'])}"
+            xbmcplugin.addDirectoryItem(HANDLE, url, li, isFolder=False)
         else:
             url = f"{BASE}?action=launch&service={urllib.parse.quote(app['id'])}"
             xbmcplugin.addDirectoryItem(HANDLE, url, li, isFolder=False)
@@ -231,6 +237,9 @@ def main():
         launch(params["service"])
     elif action == "list":
         list_apps(catalog, params.get("cat", "all"))
+    elif action == "travel":
+        import travel
+        travel.choose()
     elif action == "spotlight":
         list_spotlight(catalog, params.get("feed", "home"))
     else:

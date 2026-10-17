@@ -39,8 +39,11 @@ THEME = {
     "youtube":   ("#FF0000", "#FFFFFF"),
     "terminal":  ("#0C0C0C", "#33FF66"),
     "wifilogin": ("#0B1E33", "#4FC3F7"),
+    "travel":    ("#0E2A2A", "#4DD0C4"),
 }
 DEFAULT_THEME = ("#1C1C24", "#8A8AFF")   # any service you add later
+# Tiles that are add-on actions, not launcher services.
+EXTRA_TILES = [("travel", "Travel Mode")]
 
 
 def hex_rgb(h):
@@ -121,6 +124,7 @@ def main():
     rows = services()
     if not rows:
         sys.exit(f"No services from {LAUNCHER} --list")
+    rows += EXTRA_TILES
 
     for svc, name in rows:
         bg, accent = THEME.get(svc, DEFAULT_THEME)

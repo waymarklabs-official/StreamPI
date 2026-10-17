@@ -54,13 +54,21 @@ def weather_addon():
 
 
 def use_slot_one():
-    """Show weather slot 1 and fetch it now. Kodi only re-downloads weather
-    when the location setting changes, so step to 2 and back to 1."""
-    for value in (2, 1):
-        xbmc.executeJSONRPC(json.dumps({
-            "jsonrpc": "2.0", "id": 1, "method": "Settings.SetSettingValue",
-            "params": {"setting": "weather.currentlocation", "value": value}}))
-        xbmc.sleep(500)
+    """Show weather slot 1 and fetch it now (Kodi otherwise keeps showing the
+    old place until its next scheduled update)."""
+    xbmc.executeJSONRPC(json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "Settings.SetSettingValue",
+        "params": {"setting": "weather.currentlocation", "value": 1}}))
+    xbmc.executebuiltin("Weather.Refresh")
+
+
+def check_screen(state):
+    """If the weather on screen isn't the city we set, refresh it."""
+    city = state.get("city")
+    shown = xbmc.getInfoLabel("Weather.Location")
+    if city and shown and shown != city["name"]:
+        log(f"screen shows {shown!r}, expected {city['name']!r}: refreshing")
+        xbmc.executebuiltin("Weather.Refresh")
 
 
 def apply_city(state, city):
@@ -137,6 +145,10 @@ def main():
             try:
                 next_run = time.time() + update(state)
                 save_state(state)
+                if monitor.waitForAbort(20):      # give the refresh a moment
+                    break
+                if state.get("mode", "home") != "home":
+                    check_screen(state)
             except Exception as exc:       # never let the service die
                 log(f"update failed: {exc}")
                 next_run = time.time() + RETRY
