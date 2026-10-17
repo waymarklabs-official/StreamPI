@@ -24,6 +24,7 @@ import where  # noqa: E402
 DATA = xbmcvfs.translatePath(ADDON.getAddonInfo("profile"))
 STATE = os.path.join(DATA, "state.json")
 REFRESH = 2 * 3600        # ships move ~20 knots: 2 h is plenty for weather
+REFRESH_PLANE = 15 * 60   # planes cover ~120 miles in 15 minutes
 RETRY = 10 * 60           # after a network failure
 
 
@@ -116,12 +117,15 @@ def update(state):
     except NotImplementedError as exc:
         log(str(exc))
         return REFRESH
+    except LookupError as exc:             # e.g. flight not airborne yet
+        log(f"{exc}; keeping {state.get('city', {}).get('name')}")
+        return REFRESH_PLANE if state["mode"] == "plane" else RETRY
     except Exception as exc:               # network, site change: keep last city
         log(f"lookup failed, keeping {state.get('city', {}).get('name')}: {exc}")
         return RETRY
     if city:
         apply_city(state, city)
-    return REFRESH
+    return REFRESH_PLANE if state["mode"] == "plane" else REFRESH
 
 
 def travel_mtime():

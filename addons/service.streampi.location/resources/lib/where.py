@@ -19,6 +19,20 @@ import xml.etree.ElementTree as etree
 TRAVEL_FILE = "/var/lib/streampi/travel.json"
 GISMETEO = "https://services.gismeteo.net/inform-service/inf_chrome/cities/"
 CRUISEMAPPER = "https://www.cruisemapper.com"
+ADSB = "https://api.adsb.lol/v2/callsign/"      # free, open ADS-B feed
+
+# Flight numbers use the airline's IATA code (DL1234); aircraft broadcast the
+# ICAO code (DAL1234). Common airlines; a 3-letter code is used as typed.
+AIRLINES = {
+    "AA": "AAL", "DL": "DAL", "UA": "UAL", "WN": "SWA", "B6": "JBU", "AS": "ASA",
+    "NK": "NKS", "F9": "FFT", "G4": "AAY", "HA": "HAL", "SY": "SCX", "MX": "MXY",
+    "AC": "ACA", "WS": "WJA", "PD": "POE", "AM": "AMX", "Y4": "VOI", "CM": "CMP",
+    "AV": "AVA", "LA": "LAN", "BA": "BAW", "VS": "VIR", "LH": "DLH", "AF": "AFR",
+    "KL": "KLM", "IB": "IBE", "EI": "EIN", "LX": "SWR", "OS": "AUA", "SK": "SAS",
+    "AY": "FIN", "TP": "TAP", "AZ": "ITY", "FR": "RYR", "U2": "EZY", "W6": "WZZ",
+    "EK": "UAE", "QR": "QTR", "EY": "ETD", "TK": "THY", "QF": "QFA", "NZ": "ANZ",
+    "SQ": "SIA", "CX": "CPA", "JL": "JAL", "NH": "ANA", "KE": "KAL",
+}
 UA = ("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
 
@@ -83,6 +97,35 @@ def ship_position(url):
     return (float(m.group(1)), float(m.group(2))) if m else None
 
 
+# -------------------------------------------------------------- plane --
+
+def callsign(flight):
+    """'DL 1234' / 'dl1234' -> 'DAL1234'; 'DAL1234' stays as is."""
+    f = re.sub(r"\s+", "", flight).upper()
+    m = re.fullmatch(r"([A-Z]{3})(\d{1,4}[A-Z]?)", f)
+    if m:
+        return f
+    m = re.fullmatch(r"([A-Z0-9]{2})(\d{1,4}[A-Z]?)", f)
+    if not m:
+        raise LookupError(f"can't read flight number {flight!r}")
+    code = AIRLINES.get(m.group(1))
+    if not code:
+        raise LookupError(f"unknown airline {m.group(1)!r}: type the 3-letter "
+                          f"ICAO code instead (e.g. DAL1234)")
+    return code + m.group(2).lstrip("0")
+
+
+def flight_position(flight):
+    """(lat, lon) of the aircraft in the air now. LookupError before take-off,
+    after landing, or out of receiver range (mid-ocean)."""
+    cs = callsign(flight)
+    data = json.loads(_get(ADSB + cs))
+    for ac in data.get("ac") or []:
+        if ac.get("lat") is not None and ac.get("lon") is not None:
+            return float(ac["lat"]), float(ac["lon"])
+    raise LookupError(f"{cs} not being tracked right now")
+
+
 # ----------------------------------------------------------- gismeteo --
 
 def _cities(params):
@@ -129,7 +172,11 @@ def resolve(travel, cache=None):
     if mode == "hotel":
         return city_named(travel.get("city", ""))
     if mode == "plane":
-        raise NotImplementedError("flight tracking is not built yet")
+        pos = flight_position(travel.get("flight", ""))
+        city = nearest_city(*pos)
+        if city:
+            city["position"] = pos
+        return city
     return None
 
 
@@ -140,6 +187,8 @@ if __name__ == "__main__":
             t.update(ship=sys.argv[2], line=sys.argv[3] if len(sys.argv) > 3 else "")
         elif t["mode"] == "hotel":
             t["city"] = sys.argv[2]
+        elif t["mode"] == "plane":
+            t["flight"] = sys.argv[2]
     else:
         t = load_travel()
     print(t, "->", resolve(t))
