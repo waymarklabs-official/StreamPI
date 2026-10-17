@@ -1,0 +1,6 @@
+# StreamPI: Kodi, cage and Chromium (libinput) must leave the FB-RCS remote's
+# raw devices alone; fb_remote.py reads and grabs them and sends Kodi proper
+# commands. Without this, a remote that reconnects while Kodi is running gets
+# grabbed by Kodi first, and the stray volume key before every Back reaches
+# Kodi (volume bar on screen, volume creeping).
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="FB-RCS*", ENV{LIBINPUT_IGNORE_DEVICE}="1"
