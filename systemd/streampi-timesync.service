@@ -1,0 +1,8 @@
+[Unit]
+Description=StreamPI clock fallback (HTTPS Date header when NTP is blocked)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/streampi-timesync

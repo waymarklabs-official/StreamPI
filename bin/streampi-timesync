@@ -1,0 +1,27 @@
+#!/bin/sh
+# StreamPI clock fallback for networks that block NTP (ships, hotels).
+#
+# The Pi has no battery clock, and timesyncd needs UDP 123, which captive
+# networks often drop: the clock then only advances while powered and falls
+# hours behind across reboots. Every HTTPS reply carries the server's time
+# in its Date header, so take it from there when NTP is not synchronized.
+# At home NTP works and this does nothing.
+
+[ "$(timedatectl show -p NTPSynchronized --value)" = "yes" ] && exit 0
+
+for url in https://www.google.com https://www.cloudflare.com; do
+    # -k: if the clock is far enough off, certificates look invalid; the
+    # header is only used to set the time, never trusted for anything else.
+    d=$(curl -skI --max-time 10 "$url" | sed -n 's/^[Dd]ate: *//p' | tr -d '\r')
+    [ -n "$d" ] || continue
+    new=$(date -u -d "$d" +%s 2>/dev/null) || continue
+    old=$(date -u +%s)
+    drift=$((new - old))
+    if [ "${drift#-}" -gt 30 ]; then
+        date -u -s "@$new" >/dev/null && echo "clock was ${drift}s off; set from $url to $(date)"
+        command -v fake-hwclock >/dev/null && fake-hwclock save
+    fi
+    exit 0
+done
+echo "no HTTPS time source reachable"
+exit 0

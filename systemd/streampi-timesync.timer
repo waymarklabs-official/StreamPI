@@ -1,0 +1,9 @@
+[Unit]
+Description=Keep the clock right on networks that block NTP
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30min
+
+[Install]
+WantedBy=timers.target
